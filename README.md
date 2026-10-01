@@ -24,7 +24,7 @@
 
 - **Go 1.27** / 标准库 `net/http`
 - **chi**：路由（贴近标准库，中间件生态小而成体系）
-- **pgx/v5**：直接手写 SQL，不引 ORM —— 表结构是这道题的重点，SQL 显式写出来更容易检查
+- **pgx/v5**：直接手写 SQL，不引 ORM 
 - **PostgreSQL 16**：`docker compose` 起
 - **JWT**（`golang-jwt/jwt/v5`）：鉴权
 
