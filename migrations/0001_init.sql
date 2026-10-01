@@ -1,13 +1,13 @@
 -- NetDisk 初始表结构
 --
--- 设计要点（对应任务书"请在表结构的设计上多花些心思，不要为后续功能的实现埋雷"）：
+-- 设计要点：
 --   1. 文件与文件夹**同一张表** nodes，用 parent_id 自引用成树。分开两张表会让
 --      "移动"、"列目录"、"分享"这些操作全部要写两遍。
 --   2. 内容与元数据分离：nodes 是"用户看到的东西"，blobs 是"磁盘上真实存在的一份内容"。
 --      blobs.content_hash 上的唯一约束就是秒传的落点。
 --   3. **不设 ref_count 计数列**。引用关系的事实来源是 nodes.blob_id 本身，
 --      删到最后一个引用时用 `NOT EXISTS (SELECT 1 FROM nodes WHERE blob_id = ...)` 判定。
---      代价是删除多一次索引查找；收益是不存在"计数漂移导致 blob 永远删不掉"的坑。
+--      代价是删除多一次索引查找；收益是不存在"计数漂移导致 blob 永远删不掉"的bug。
 --   4. 根目录用 parent_id IS NULL 表示 —— 但 NULL 在唯一索引里互不相等，
 --      所以同名唯一约束必须用 COALESCE 表达式索引（见下方 nodes_sibling_name_uniq）。
 --   5. 弱删除：nodes.deleted_at 为 NULL 才算"存在"。唯一索引也带这个条件，
