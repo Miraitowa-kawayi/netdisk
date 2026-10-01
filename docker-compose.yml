@@ -1,0 +1,44 @@
+# 本地开发依赖：PostgreSQL（P6 才需要 MinIO，用 profile 隔离）
+#
+# 注意：migrations/ 挂在 /docker-entrypoint-initdb.d 下，只在**数据卷为空时**执行一次。
+# 改了 SQL 想重新初始化 → docker compose down -v && docker compose up -d
+# （P3 之后如果表结构频繁变动，再引入 golang-migrate 之类的迁移工具）
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: netdisk-postgres
+    environment:
+      POSTGRES_USER: netdisk
+      POSTGRES_PASSWORD: netdisk
+      POSTGRES_DB: netdisk
+    # 宿主机 5433：避免和机器上可能已有的 5432 冲突
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netdisk -d netdisk"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # 对象存储（P6）。启用方式：docker compose --profile objectstore up -d
+  minio:
+    image: minio/minio:latest
+    container_name: netdisk-minio
+    profiles: ["objectstore"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web 控制台
+    volumes:
+      - minio-data:/data
+
+volumes:
+  postgres-data:
+  minio-data:

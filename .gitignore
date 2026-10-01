@@ -1,0 +1,21 @@
+# 二进制与构建产物
+/bin/
+/dist/
+*.exe
+
+# 运行期数据：上传的文件、临时分片
+/data/
+/tmp/
+
+# 本地配置（.env.example 是模板，要提交）
+.env
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+
+# Go 工具
+*.test
+*.out
+coverage.html
