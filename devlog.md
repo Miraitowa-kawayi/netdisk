@@ -18,8 +18,13 @@
 2. **唯一索引里的 NULL 陷阱**：想让"同一目录下不能有同名文件"，
    直觉写法是给 `nodes (owner_id, parent_id, name)` 建唯一索引。但 PostgreSQL 的唯一索引里
    NULL 互不相等，而根目录的 `parent_id` 就是 NULL —— 于是**根目录下的重名全部漏过**。
-   最后改成 `COALESCE(parent_id, '<nil-uuid>')` 的表达式索引。
-   同时发现 MySQL 的行为不一样（NULL 也参与比较），同一个写法换数据库结论就变（正在了解背后原因）
+   最后改成 `COALESCE(parent_id, '<nil-uuid>')` 的表达式索引
+   （用 psql 建三张表实测过：直觉写法能插进两条重名，COALESCE 和 PG 15+ 的
+   `UNIQUE NULLS NOT DISTINCT` 都会拒绝）。
+   顺带查清了一件我一开始搞错的事：**这一点 MySQL 和 PostgreSQL 是一样的**（唯一索引里都
+   允许多个 NULL，因为 NULL 表示"未知"，未知 ≠ 未知）。真正不一样的是 SQL Server（只允许
+   一个 NULL）。MySQL 在这件事上真正的坑是**默认排序规则大小写不敏感**
+   （utf8mb4_0900_ai_ci），`a.txt` 和 `A.txt` 会撞唯一键；PG 默认区分大小写。
 3. **秒传的引用计数要不要存**：一开始想给 `blobs` 加 `ref_count` 列，后来改成删除时用
    `NOT EXISTS (SELECT 1 FROM nodes WHERE blob_id = ?)` 现算。理由是计数列一旦漏了一次加减
    就会永久漂移，最后表现为"文件明明删光了，磁盘上的内容却永远删不掉"。

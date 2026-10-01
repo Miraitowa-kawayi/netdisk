@@ -53,7 +53,19 @@ CREATE UNIQUE INDEX nodes_sibling_name_uniq
     WHERE deleted_at IS NULL;
 ```
 
-（这在 MySQL 上不会遇到 —— MySQL 唯一索引里 NULL 也参与比较。换个数据库结论就变，是个值得记住的差异。）
+### 别的数据库在这件事上怎么表现
+
+- **MySQL**：和 PostgreSQL **一样**允许多个 NULL（NULL 表示"未知"，未知 ≠ 未知），
+  所以这个 `COALESCE` 写法换到 MySQL 一样需要。MySQL 在这件事上真正的坑在别处：
+  默认排序规则（`utf8mb4_0900_ai_ci`）**大小写不敏感**，`a.txt` 和 `A.txt` 会撞唯一键；
+  PostgreSQL 默认区分大小写。
+- **SQL Server**：唯一索引里**只允许一个 NULL**，是把 NULL 当作相等来比较的 ——
+  在那边反而不需要 `COALESCE`。
+- **PostgreSQL 15+**：可以用 `UNIQUE NULLS NOT DISTINCT (owner_id, parent_id, name)`
+  让约束按"NULL 彼此相等"来判，语义比表达式索引更直白；本项目的写法两者都可以，
+  选 `COALESCE` 是因为它同时兼容更老的 PG 版本。
+
+（这三种行为都能用 psql 五分钟验完，见 `../02_D0知识点与自测.md` 的实验 2。）
 
 ## 5. 弱删除，以及它对唯一索引的影响
 
