@@ -110,3 +110,42 @@
 
 - D2（P3 文件夹树）：新建 / 移动 / 列子项，移动时的**环检测**、
   删除文件夹的级联语义。判据：把文件夹移进自己的子目录被**明确拒绝**。
+
+## 2026-10-03 · D2 文件夹树：建目录 / 移动 / 级联删 + 环检测
+
+**做了什么**
+
+- 文件与文件夹共用 `nodes` 表，所以"建文件夹"只是 `is_dir = true` 的另一条插入路径：
+  - 新路由 `POST /api/v1/files/dirs`（JSON `{name, parent_id}`；`parent_id` 缺省或 `null` 都算根目录）。
+  - `PATCH /api/v1/files/{id}` 从"只能改名"升级成"改名**和/或**移动"：`parent_id` 用
+    `json.RawMessage` 接，才分得清 **键不存在（不动）** / **`null`（移回根目录）** /
+    **uuid（移到那个目录）** 三种情况；写库时 `UpdateNode` 用
+    `CASE WHEN $4 THEN $5::uuid ELSE parent_id END`，让"改哪几列"由开关决定。
+  - `DELETE /api/v1/files/{id}` 改成**级联**：一条递归 CTE 弱删整棵子树。文件和文件夹共用同一条路径
+    —— 文件就是"只含自己一个节点的子树"。
+- **环检测**（D2 的难点，自己写）：`repository.IsSelfOrDescendant` —— 一条**往上爬**的递归 CTE，
+  从目标目录沿 `parent_id` 走到根，看路上有没有被移的那个节点。命中 → `ErrCycle` → HTTP **409**。
+- `internal/repository/nodes_test.go`：打**真数据库**的集成测试（库连不上时 Skip，不是 FAIL）。
+
+**判据（实测）**
+
+| 验的什么 | 结果 |
+| --- | --- |
+| 把 A 移进 A 的子目录 B | **409**，body 99 字节 = `cannot move a folder into itself or its own subdirectory` |
+| 把 A 移进 A 自己 | **409**，同上 |
+| 反向：B 移回根目录（`parent_id: null`） | **200**，`parent_id` 变回 `null` —— 合法的移动没被误伤 |
+| 同层重名 | **409**（body 95 字节，和环拒那句不是一个长度） |
+| 删 A（底下有 X / Y 两层） | **204**；再取孙子 Y 的 download → **404** |
+
+**卡在哪 / 踩到的坑**
+
+1. 往上爬和往下爬只差一个 JOIN：往下 `n.parent_id = x.id`，往上 `n.id = x.parent_id`。
+2. 递归 CTE 用 `UNION ALL`；往上那条还加了 `CYCLE id SET is_cycle USING path`（PG 14+）——
+   万一数据里本来就有环，查询会停下来而不是无限递归。（往下爬的 `SoftDeleteSubtree` 还没加。）
+3. **409 有两种来源（环拒 / 重名），状态码一样，只有 body 能分** —— 99 和 95 就是它俩的指纹。
+
+**下一步**
+
+- D3（10/4，P5 多用户 + 秒传，最难的一天）：内容寻址（hash → blob）+ **引用计数**决定
+  "最后一个引用消失才真删"。判据：两个用户传**同一个文件**，第二次瞬间完成且磁盘占用不变；
+  两边都删掉后 blob 才消失。
