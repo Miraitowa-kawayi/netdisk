@@ -22,10 +22,10 @@
    最后改成 `COALESCE(parent_id, '<nil-uuid>')` 的表达式索引
    （用 psql 建三张表实测过：直觉写法能插进两条重名，COALESCE 和 PG 15+ 的
    `UNIQUE NULLS NOT DISTINCT` 都会拒绝）。
-   顺带查清了一件我一开始搞错的事：**这一点 MySQL 和 PostgreSQL 是一样的**（唯一索引里都
+   顺带弄清楚了一件我一开始就有点混乱的事：**这一点 MySQL 和 PostgreSQL 是一样的**（唯一索引里都
    允许多个 NULL，因为 NULL 表示"未知"，未知 ≠ 未知）。真正不一样的是 SQL Server（只允许
    一个 NULL）。MySQL 在这件事上真正的bug是**默认排序规则大小写不敏感**
-   （utf8mb4_0900_ai_ci），`a.txt` 和 `A.txt` 会撞唯一键；PG 默认区分大小写。
+   （utf8mb4_0900_ai_ci），`a.txt` 和 `A.txt` 会撞唯一键；但 PG 默认区分大小写。
 3. **秒传的引用计数要不要存**：一开始想给 `blobs` 加 `ref_count` 列，后来改成删除时用
    `NOT EXISTS (SELECT 1 FROM nodes WHERE blob_id = ?)` 现算。理由是计数列一旦漏了一次加减
    就会永久漂移，最后表现为"文件明明删光了，磁盘上的内容却永远删不掉"。
@@ -49,7 +49,7 @@
   同一份内容磁盘上只留一个对象。
 
 **分工**：P2 和 P1 的 SQL / 路由 / DTO / 错误映射由 Agent 搭；
-**`internal/storage/local.go` 的 `Put` / `Open`（这一天的流式核心）我自己写**，
+**`internal/storage/local.go` 的 `Put` / `Open`（这一天的流式核心）**，
 验收契约是 `internal/storage/local_test.go`。
 
 **curl 验证过的行为**
@@ -74,7 +74,7 @@
 
 **做了什么**
 
-- 实现 `internal/storage/local.go` 的 `Put` / `Open`（D1 的流式核心，我自己写、Agent 逐行 review）：
+- 实现 `internal/storage/local.go` 的 `Put` / `Open`（D1 的流式核心是我自己写的、Agent 逐行 review，提出修改意见我修改完成的）：
   - `Put`：`io.MultiWriter(tempFile, hasher)` 边读边写盘、顺路算 SHA-256，全程没有 `io.ReadAll`；
     临时文件用 `os.CreateTemp(目标目录, ".put-*")` 建在**目标文件所在目录**（同一文件系统，
     `os.Rename` 才是原子的）→ `Sync` → `Close` → `Rename`；中途出错用 defer 清掉临时文件，
@@ -101,12 +101,12 @@
 
 1. 第一版 `Open` 编不过：`f` 和 `info` 都组装好了，**却忘了替换末尾那句占位 `return`**，
    连带 `info` 声明未用、还用了 `ObjectInfo` 里不存在的 `ModTime` 字段。根因是
-   **没先读 `storage.go` 的接口定义就动手** —— 写实现前先把契约文件读一遍。
+   **忘记 `storage.go` 的接口定义就动手** —— 教训是写实现前先把契约文件读一遍。
 2. 重传同名文件被 409 挡住（`another entry with the same name already exists here`）：
    是 D0 那条 `COALESCE(parent_id, '<nil-uuid>')` 唯一索引在起作用，不是 bug；顺便确认了
    弱删（只打 `deleted_at`）能让名字重新可用。
 
 **下一步**
 
-- D2（P3 文件夹树）：新建 / 移动 / 列子项，移动时的**环检测**（四个难点里的第二个，我自己写）、
+- D2（P3 文件夹树）：新建 / 移动 / 列子项，移动时的**环检测**、
   删除文件夹的级联语义。判据：把文件夹移进自己的子目录被**明确拒绝**。
