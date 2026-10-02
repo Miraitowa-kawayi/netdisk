@@ -69,3 +69,44 @@
 
 - 实现 `local.Put` / `local.Open` → `go test ./internal/storage/ -v` 全绿
 - 然后跑 D1 的判据：传 500MB，`docker stats` 里内存不随文件大小涨
+
+## 2026-10-03 · D1 收尾：流式核心 + 500MB 验证
+
+**做了什么**
+
+- 实现 `internal/storage/local.go` 的 `Put` / `Open`（D1 的流式核心，我自己写、Agent 逐行 review）：
+  - `Put`：`io.MultiWriter(tempFile, hasher)` 边读边写盘、顺路算 SHA-256，全程没有 `io.ReadAll`；
+    临时文件用 `os.CreateTemp(目标目录, ".put-*")` 建在**目标文件所在目录**（同一文件系统，
+    `os.Rename` 才是原子的）→ `Sync` → `Close` → `Rename`；中途出错用 defer 清掉临时文件，
+    不留半成品。
+  - `Open`：`os.Open` + `Stat` 组装 `ObjectInfo`；`*os.File` 天生可 Seek，`http.ServeContent`
+    的 Range/206 靠它；对象不存在时翻成 `ErrNotFound`。
+- `go test ./internal/storage/ -v` **7/7 通过**，`go build` / `go vet` / `gofmt` 都干净。
+
+**500MB 流式验证**
+
+| | |
+| --- | --- |
+| 文件 | `/tmp/big500.bin`，500,000,000 字节（477M） |
+| server 进程 RSS | 空闲 14,363 KB → 上传中峰值 14,572 KB（**+209 KB**） |
+
+差约 2400 倍 —— 内存不随对象大小涨，D1 的判据满足。落盘的 blob
+（`data/blobs/blobs/ed0e4078-…`）也确实是 477M，不是传一半假装成功。
+
+⚠️ 计划里"用 `docker stats` 看内存"这句要改：进容器的只有 postgres，**Go 服务跑在宿主机**，
+`docker stats` 里根本没有它 —— 要看的是宿主机上 server 进程的 RSS（`ps -o rss= -p <真身 pid>`，
+`go run` 的父进程不是真身）。
+
+**卡在哪 / 踩到的坑**
+
+1. 第一版 `Open` 编不过：`f` 和 `info` 都组装好了，**却忘了替换末尾那句占位 `return`**，
+   连带 `info` 声明未用、还用了 `ObjectInfo` 里不存在的 `ModTime` 字段。根因是
+   **没先读 `storage.go` 的接口定义就动手** —— 写实现前先把契约文件读一遍。
+2. 重传同名文件被 409 挡住（`another entry with the same name already exists here`）：
+   是 D0 那条 `COALESCE(parent_id, '<nil-uuid>')` 唯一索引在起作用，不是 bug；顺便确认了
+   弱删（只打 `deleted_at`）能让名字重新可用。
+
+**下一步**
+
+- D2（P3 文件夹树）：新建 / 移动 / 列子项，移动时的**环检测**（四个难点里的第二个，我自己写）、
+  删除文件夹的级联语义。判据：把文件夹移进自己的子目录被**明确拒绝**。
