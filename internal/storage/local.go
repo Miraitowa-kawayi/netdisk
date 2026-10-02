@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -60,19 +62,89 @@ func (l *Local) keyPath(key string) (string, error) {
 // 提示：os.CreateTemp(目标目录, ".put-*") 建临时文件能保证同一文件系统，
 // rename 才是原子的。
 func (l *Local) Put(ctx context.Context, key string, r io.Reader, size int64) (string, error) {
-	return "", errors.New("storage: local.Put 还没实现（D1 的流式核心）")
+	// 获取安全的绝对路径
+	destPath, err := l.keyPath(key)
+	if err != nil {
+		return "", err
+	}
+
+	// 确保目标目录存在
+	dir := filepath.Dir(destPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+
+	// 创建临时文件
+	tempFile, err := os.CreateTemp(dir, ".put-*")
+	if err != nil {
+		return "", fmt.Errorf("storage: create temp file: %w", err)
+	}
+	defer tempFile.Close()
+
+	// defer 清理临时文件，如果出错或中途取消
+	var success bool
+	defer func() {
+		tempFile.Close()
+		if !success {
+			os.Remove(tempFile.Name())
+		}
+	}()
+
+	// 边读 r 边写盘，同时计算 SHA-256（使用io.MultiWriter分流）
+	hasher := sha256.New()
+	mw := io.MultiWriter(tempFile, hasher)
+
+	if _, err := io.Copy(mw, r); err != nil {
+		return "", fmt.Errorf("storage: copy to temp file: %w", err)
+	}
+
+	// 刷盘并关闭临时文件，避免remane时数据未写入磁盘
+	if err := tempFile.Sync(); err != nil {
+		return "", fmt.Errorf("storage: sync temp file: %w", err)
+	}
+	if err := tempFile.Close(); err != nil {
+		return "", fmt.Errorf("storage: close temp file: %w", err)
+	}
+
+	// 原子替换
+	if err := os.Rename(tempFile.Name(), destPath); err != nil {
+		return "", fmt.Errorf("storage: rename temp file: %w", err)
+	}
+	success = true
+
+	// 返回 SHA-256 哈希值
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 // Open 打开对象供读取。返回的 reader 必须能 Seek ——
 // http.ServeContent 靠它支持 Range/206（D4 断点续传的下载半边）。
 // 对象不存在时返回 ErrNotFound。
 func (l *Local) Open(ctx context.Context, key string) (io.ReadSeekCloser, ObjectInfo, error) {
-	return nil, ObjectInfo{}, errors.New("storage: local.Open 还没实现（D1 的流式核心）")
-}
+	destPath, err := l.keyPath(key)
+	if err != nil {
+		return nil, ObjectInfo{}, err
+	}
 
-// ===========================================================================
-//  下面两个已经写好，可以拿来照抄结构（路径怎么取、错误怎么翻）。
-// ===========================================================================
+	f, err := os.Open(destPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ObjectInfo{}, ErrNotFound
+		}
+		return nil, ObjectInfo{}, err
+	}
+
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, ObjectInfo{}, err
+	}
+
+	info := ObjectInfo{
+		Key:  key,
+		Size: fi.Size(),
+	}
+	return f, info, nil
+}
 
 func (l *Local) Delete(ctx context.Context, key string) error {
 	p, err := l.keyPath(key)
