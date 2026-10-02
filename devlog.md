@@ -31,7 +31,41 @@
    就会永久漂移，最后表现为"文件明明删光了，磁盘上的内容却永远删不掉"。
    多一次索引查找换掉一整类排查起来很痛的 bug。
 
-**下一步（D1）**
+**当时记的下一步**
 
 - P1：文件的上传/下载/重命名/删除/列表，全程流式（不能把请求体读进内存）
 - P2：注册登录 + JWT 中间件，把 P1 的接口保护起来
+
+## 2026-10-02 · D1：P1 文件接口 + P2 鉴权
+
+**做了什么**
+
+- P2 全量：`POST /api/v1/auth/register`、`/login`、`GET /auth/me`；HS256 JWT 中间件
+  把 `/api/v1/files` 整套保护起来。密码走 bcrypt；登录失败不区分"用户不存在/密码错"，
+  且两条路径都过一次 bcrypt，避免用响应时间枚举用户名。
+- P1：上传（multipart **流式**，边收边写）、下载（`http.ServeContent`，Range/206 白送）、
+  列表（每个文件带 `download_url`）、改名、删除（弱删，只打 `deleted_at`）。
+- 表结构没动：D0 定的 `nodes`（树）+ `blobs`（内容）正好接得上 —— 内容按 SHA-256 去重，
+  同一份内容磁盘上只留一个对象。
+
+**分工**：P2 和 P1 的 SQL / 路由 / DTO / 错误映射由 Agent 搭；
+**`internal/storage/local.go` 的 `Put` / `Open`（这一天的流式核心）我自己写**，
+验收契约是 `internal/storage/local_test.go`。
+
+**curl 验证过的行为**
+
+| 场景 | 结果 |
+| --- | --- |
+| 无 token 访问 `/api/v1/files` | 401 |
+| 注册 / 重复注册 | 201 / 409 |
+| 密码错、用户不存在 | 都是同一句 401 |
+| 登录 → `/me`；伪造 token | 200；401 |
+| 空根目录列表 | 200 `{"files":[]}` |
+| `parent_id` 不是 UUID | 400 |
+| 改名/删除不存在的节点 | 404 |
+| 上传 | 500（`Put` 还是占位实现） |
+
+**下一步**
+
+- 实现 `local.Put` / `local.Open` → `go test ./internal/storage/ -v` 全绿
+- 然后跑 D1 的判据：传 500MB，`docker stats` 里内存不随文件大小涨
