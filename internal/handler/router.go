@@ -9,6 +9,7 @@ import (
 	"github.com/Miraitowa-kawayi/netdisk/internal/httpx"
 	"github.com/Miraitowa-kawayi/netdisk/internal/middleware"
 	"github.com/Miraitowa-kawayi/netdisk/internal/repository"
+	"github.com/Miraitowa-kawayi/netdisk/internal/service"
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 )
@@ -18,6 +19,8 @@ type Deps struct {
 	Cfg    *config.Config
 	Logger *slog.Logger
 	Store  *repository.Store
+	Auth   *service.Auth
+	Files  *service.Files
 }
 
 // Server 持有依赖，各 handler 是它的方法。
@@ -48,6 +51,28 @@ func NewRouter(deps Deps) http.Handler {
 	r.Get("/healthz", s.healthz)
 	r.Get("/readyz", s.readyz)
 
-	// /api/v1 分组从 D1 开始建：/auth、/files、/folders、/shares。
+	// /api/v1：auth 是公开的（注册/登录），其余全部要 Bearer token。
+	requireAuth := middleware.RequireAuth(deps.Logger, deps.Auth.Tokens())
+
+	r.Route("/api/v1", func(r chi.Router) {
+		r.Route("/auth", func(r chi.Router) {
+			r.Post("/register", s.authRegister)
+			r.Post("/login", s.authLogin)
+			r.Group(func(r chi.Router) {
+				r.Use(requireAuth)
+				r.Get("/me", s.authMe)
+			})
+		})
+
+		r.Route("/files", func(r chi.Router) {
+			r.Use(requireAuth)
+			r.Post("/", s.uploadFile)               // multipart，全程流式
+			r.Get("/", s.listFiles)                 // ?parent_id=<uuid>|root
+			r.Get("/{id}/download", s.downloadFile) // ServeContent → Range/206 白送
+			r.Patch("/{id}", s.renameFile)
+			r.Delete("/{id}", s.deleteFile) // 弱删
+		})
+	})
+
 	return r
 }

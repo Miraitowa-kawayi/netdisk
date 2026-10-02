@@ -1,0 +1,219 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"path"
+	"strings"
+	"time"
+
+	"github.com/Miraitowa-kawayi/netdisk/internal/model"
+	"github.com/Miraitowa-kawayi/netdisk/internal/repository"
+	"github.com/Miraitowa-kawayi/netdisk/internal/storage"
+	"github.com/google/uuid"
+)
+
+const maxNameLen = 255
+
+// Files 是文件业务层：上传、下载、改名、删除、列表的规则都在这里。
+type Files struct {
+	store   *repository.Store
+	storage storage.Storage
+	backend string // 写进 blobs.backend，local | s3
+}
+
+func NewFiles(store *repository.Store, st storage.Storage, backend string) *Files {
+	return &Files{store: store, storage: st, backend: backend}
+}
+
+// UploadInput 是一次上传。Body 是**还没被读完的请求体** ——
+// Upload 会把它在读取过程中写进存储，这就是 D1"全程流式"的落点。
+type UploadInput struct {
+	OwnerID  uuid.UUID
+	ParentID *uuid.UUID // nil = 根目录
+	Name     string
+	SizeHint int64 // 拿不到就传 -1；真实大小以实际读到的字节数为准
+	Body     io.Reader
+}
+
+// Upload 把 Body 边读边写进存储，登记 blobs，再建 nodes。
+//
+// 三步：写内容（顺便算出 hash）→ 登记 blobs（同 hash 复用）→ 建节点。
+// 注意这还不是"秒传"：客户端仍然把字节传上来了，只是服务端发现内容早就有、
+// 于是丢掉刚写的副本（真正的秒传是 D3：客户端报 hash，一个字节都不传）。
+func (f *Files) Upload(ctx context.Context, in UploadInput) (model.Node, error) {
+	name, err := cleanName(in.Name)
+	if err != nil {
+		return model.Node{}, err
+	}
+	if err := f.checkParent(ctx, in.OwnerID, in.ParentID); err != nil {
+		return model.Node{}, err
+	}
+
+	// 每次上传先写到自己专属的 key，两个并发上传不会互相踩。
+	key := "blobs/" + uuid.NewString()
+
+	counted := &countingReader{r: in.Body}
+	hash, err := f.storage.Put(ctx, key, counted, in.SizeHint)
+	if err != nil {
+		return model.Node{}, fmt.Errorf("write content: %w", err)
+	}
+
+	blob, recorded, err := f.store.UpsertBlob(ctx, hash, counted.n, f.backend, key)
+	if err != nil {
+		_ = f.storage.Delete(ctx, key) // 记不上账就别把这个对象留在盘上
+		return model.Node{}, err
+	}
+	if !recorded {
+		// 这份内容库里已经有了：复用它的对象，删掉刚写的副本，磁盘上只留一份。
+		if err := f.storage.Delete(ctx, key); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return model.Node{}, fmt.Errorf("drop duplicate object: %w", err)
+		}
+	}
+
+	node, err := f.store.CreateNode(ctx, in.OwnerID, in.ParentID, name, false, blob.Size, &blob.ID)
+	if err != nil {
+		// 唯一索引终究可能挡下并发下的漏网重名：把这次刚建立的东西收回。
+		if recorded {
+			f.cleanupBlob(ctx, blob.ID, blob.StorageKey)
+		}
+		if errors.Is(err, repository.ErrUniqueViolation) {
+			return model.Node{}, ErrNameConflict
+		}
+		return model.Node{}, err
+	}
+	return node, nil
+}
+
+// cleanupBlob 收回一次失败的登记：先删行（只在没有别的节点引用时），再删对象。
+func (f *Files) cleanupBlob(ctx context.Context, blobID uuid.UUID, storageKey string) {
+	deleted, err := f.store.DeleteBlobIfUnreferenced(ctx, blobID)
+	if err != nil || !deleted {
+		return // 还有别的节点引用它，对象不能删
+	}
+	_ = f.storage.Delete(ctx, storageKey)
+}
+
+// List 列目录的直接子项。目录不存在（或不是文件夹）时返回错误而不是空列表，
+// 免得客户端把"路径写错"和"目录是空的"混起来。
+func (f *Files) List(ctx context.Context, ownerID uuid.UUID, parentID *uuid.UUID) ([]model.Node, error) {
+	if err := f.checkParent(ctx, ownerID, parentID); err != nil {
+		return nil, err
+	}
+	return f.store.ListChildren(ctx, ownerID, parentID)
+}
+
+// Rename 改名。
+func (f *Files) Rename(ctx context.Context, ownerID, id uuid.UUID, name string) (model.Node, error) {
+	name, err := cleanName(name)
+	if err != nil {
+		return model.Node{}, err
+	}
+
+	node, err := f.store.RenameNode(ctx, ownerID, id, name)
+	switch {
+	case errors.Is(err, repository.ErrUniqueViolation):
+		return model.Node{}, ErrNameConflict
+	case errors.Is(err, repository.ErrNotFound):
+		return model.Node{}, ErrNotFound
+	case err != nil:
+		return model.Node{}, err
+	}
+	return node, nil
+}
+
+// Delete 弱删节点（只打 deleted_at）。
+//
+// 故意不回收磁盘内容：判断"这份内容还有没有别人在用"需要引用计数，
+// 那是 D3 的工作。现在的行为是"文件从列表里消失，但内容还在盘上"。
+func (f *Files) Delete(ctx context.Context, ownerID, id uuid.UUID) error {
+	if err := f.store.SoftDeleteNode(ctx, ownerID, id); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return ErrNotFound
+		}
+		return err
+	}
+	return nil
+}
+
+// Download 是一次下载需要的全部东西。
+type Download struct {
+	Name    string
+	Size    int64
+	ModTime time.Time
+	Content io.ReadSeekCloser // 必须可 Seek：http.ServeContent 靠它免费拿到 Range 支持
+}
+
+// OpenDownload 打开一个文件供下载。所有权校验靠 GetNode 的 owner_id 条件完成。
+func (f *Files) OpenDownload(ctx context.Context, ownerID, id uuid.UUID) (Download, error) {
+	node, err := f.store.GetNode(ctx, ownerID, id)
+	if errors.Is(err, repository.ErrNotFound) {
+		return Download{}, ErrNotFound
+	}
+	if err != nil {
+		return Download{}, err
+	}
+	if node.BlobID == nil {
+		return Download{}, ErrNotAFile
+	}
+
+	blob, err := f.store.GetBlobByID(ctx, *node.BlobID)
+	if err != nil {
+		return Download{}, err
+	}
+
+	rc, _, err := f.storage.Open(ctx, blob.StorageKey)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return Download{}, ErrNotFound
+		}
+		return Download{}, err
+	}
+	return Download{Name: node.Name, Size: blob.Size, ModTime: node.UpdatedAt, Content: rc}, nil
+}
+
+// checkParent 确认父目录存在、属于自己、且真的是个目录。
+func (f *Files) checkParent(ctx context.Context, ownerID uuid.UUID, parentID *uuid.UUID) error {
+	if parentID == nil {
+		return nil // 根目录，永远存在
+	}
+	parent, err := f.store.GetNode(ctx, ownerID, *parentID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if !parent.IsDir {
+		return invalid("parent_id 指向的不是文件夹")
+	}
+	return nil
+}
+
+// countingReader 数实际读过去的字节数 —— 上传前拿不到文件大小，
+// 真实大小只能边读边数（也顺便当作 blob.size 的事实来源）。
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// cleanName 只留最后一段路径，挡掉 ../ 、空名和超长名。
+func cleanName(raw string) (string, error) {
+	raw = strings.ReplaceAll(raw, "\\", "/") // 浏览器偶尔会送 Windows 全路径
+	name := path.Base(strings.TrimSpace(raw))
+	if name == "" || name == "." || name == "/" || name == ".." {
+		return "", invalid("文件名不能为空")
+	}
+	if len(name) > maxNameLen {
+		return "", invalid("文件名最长 %d 字节", maxNameLen)
+	}
+	return name, nil
+}

@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"github.com/Miraitowa-kawayi/netdisk/internal/config"
 	"github.com/Miraitowa-kawayi/netdisk/internal/handler"
 	"github.com/Miraitowa-kawayi/netdisk/internal/repository"
+	"github.com/Miraitowa-kawayi/netdisk/internal/service"
+	"github.com/Miraitowa-kawayi/netdisk/internal/storage"
 )
 
 func main() {
@@ -49,9 +52,32 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	// 内容存哪里：D1 只有 local，P6 会加 s3，上层只认 storage.Storage 接口。
+	var blobStore storage.Storage
+	switch cfg.StorageDriver {
+	case "local":
+		local, err := storage.NewLocal(cfg.StorageDir)
+		if err != nil {
+			return err
+		}
+		blobStore = local
+	default:
+		return fmt.Errorf("unsupported NETDISK_STORAGE_DRIVER %q", cfg.StorageDriver)
+	}
+
+	tokens := service.NewTokens(cfg.JWTSecret, cfg.JWTTTL)
+	auth := service.NewAuth(store, tokens)
+	files := service.NewFiles(store, blobStore, cfg.StorageDriver)
+
 	srv := &http.Server{
-		Addr:    cfg.Addr,
-		Handler: handler.NewRouter(handler.Deps{Cfg: cfg, Logger: logger, Store: store}),
+		Addr: cfg.Addr,
+		Handler: handler.NewRouter(handler.Deps{
+			Cfg:    cfg,
+			Logger: logger,
+			Store:  store,
+			Auth:   auth,
+			Files:  files,
+		}),
 		// 只限制读请求头的时间，防止慢速连接占坑；
 		// 不设 ReadTimeout / WriteTimeout —— 上传下载都是大体积长连接，设了必然中途掐断。
 		ReadHeaderTimeout: 10 * time.Second,

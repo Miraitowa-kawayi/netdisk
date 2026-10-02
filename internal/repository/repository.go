@@ -3,10 +3,36 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// 收敛过的驱动层错误，让上层不用认识 pgx。
+var (
+	// ErrNotFound 表示按主键/唯一键没查到记录。
+	ErrNotFound = errors.New("repository: not found")
+	// ErrUniqueViolation 表示撞上了唯一约束（用户名、同层同名……）。
+	ErrUniqueViolation = errors.New("repository: unique violation")
+)
+
+// translate 把 pgx 的错误翻成上面两个哨兵，其余原样返回。
+func translate(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return ErrUniqueViolation
+	}
+	return err
+}
 
 // Store 持有连接池。后续各实体的查询方法（Users/Nodes/Blobs/Shares/Uploads）
 // 都挂在它上面，按主题拆成同包的多个文件。
