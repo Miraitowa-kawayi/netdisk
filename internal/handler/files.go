@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -221,11 +223,56 @@ func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, dl.Name, dl.ModTime, dl.Content)
 }
 
-type renameRequest struct {
-	Name string `json:"name"`
+// createDirRequest 是 POST /files/dirs 的请求体。
+// parent_id 缺省、空串、null 都表示根目录（JSON 的 null 解到 string 会保持零值）。
+type createDirRequest struct {
+	Name     string `json:"name"`
+	ParentID string `json:"parent_id"`
 }
 
-func (s *Server) renameFile(w http.ResponseWriter, r *http.Request) {
+// createDir 新建文件夹。目录没有内容流，所以走普通 JSON 而不是 multipart。
+func (s *Server) createDir(w http.ResponseWriter, r *http.Request) {
+	uid, ok := userID(r)
+	if !ok {
+		httpx.Fail(w, r, s.deps.Logger, httpx.Unauthorized("authentication required"))
+		return
+	}
+
+	var req createDirRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		httpx.Fail(w, r, s.deps.Logger, httpx.Invalid("请求体不是合法的 JSON").With(err))
+		return
+	}
+	parentID, err := parseParentID(req.ParentID)
+	if err != nil {
+		httpx.Fail(w, r, s.deps.Logger, httpx.Invalid(err.Error()))
+		return
+	}
+
+	node, err := s.deps.Files.CreateDir(r.Context(), uid, parentID, req.Name)
+	if err != nil {
+		s.failService(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"node": node})
+}
+
+// patchNodeRequest 是 PATCH /files/{id} 的请求体。
+//
+// ParentID 用 json.RawMessage 是为了区分 JSON 里三种不同的情况 ——
+// 换成 *uuid.UUID 就区分不出来了：
+//
+//	键不存在    → nil                        （不改父目录）
+//	键是 null   → []byte("null")             （移回根目录）
+//	键是个 uuid → 那个 uuid                   （移到该目录下）
+type patchNodeRequest struct {
+	Name     *string         `json:"name"`
+	ParentID json.RawMessage `json:"parent_id"`
+}
+
+// patchFile 改名和/或移动。一个端点两种用途：给了 name 就是改名，
+// 给了 parent_id 就是移动，两个都给就一起做。
+func (s *Server) patchFile(w http.ResponseWriter, r *http.Request) {
 	uid, ok := userID(r)
 	if !ok {
 		httpx.Fail(w, r, s.deps.Logger, httpx.Unauthorized("authentication required"))
@@ -238,13 +285,36 @@ func (s *Server) renameFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req renameRequest
+	var req patchNodeRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		httpx.Fail(w, r, s.deps.Logger, httpx.Invalid("请求体不是合法的 JSON").With(err))
 		return
 	}
+	if req.Name == nil && req.ParentID == nil {
+		httpx.Fail(w, r, s.deps.Logger, httpx.Invalid("至少要给一个 name 或 parent_id"))
+		return
+	}
 
-	node, err := s.deps.Files.Rename(r.Context(), uid, id, req.Name)
+	in := service.UpdateInput{Name: req.Name}
+	if req.ParentID != nil {
+		in.SetParent = true
+		// null（而不是缺省）才是"移回根目录"。
+		if !bytes.Equal(bytes.TrimSpace(req.ParentID), []byte("null")) {
+			var raw string
+			if err := json.Unmarshal(req.ParentID, &raw); err != nil {
+				httpx.Fail(w, r, s.deps.Logger, httpx.Invalid("parent_id 必须是字符串或 null"))
+				return
+			}
+			p, err := parseParentID(raw)
+			if err != nil {
+				httpx.Fail(w, r, s.deps.Logger, httpx.Invalid(err.Error()))
+				return
+			}
+			in.ParentID = p
+		}
+	}
+
+	node, err := s.deps.Files.Update(r.Context(), uid, id, in)
 	if err != nil {
 		s.failService(w, r, err)
 		return

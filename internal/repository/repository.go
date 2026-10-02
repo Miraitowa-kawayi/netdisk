@@ -17,6 +17,9 @@ var (
 	ErrNotFound = errors.New("repository: not found")
 	// ErrUniqueViolation 表示撞上了唯一约束（用户名、同层同名……）。
 	ErrUniqueViolation = errors.New("repository: unique violation")
+	// ErrNotImplemented 是尚未实现的骨架方法的占位错误。难点方法由人补上之前，
+	// 调用它会明确失败，而不是悄悄返回零值（false / 空列表）。
+	ErrNotImplemented = errors.New("repository: not implemented")
 )
 
 // translate 把 pgx 的错误翻成上面两个哨兵，其余原样返回。

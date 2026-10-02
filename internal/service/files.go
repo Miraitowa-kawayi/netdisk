@@ -105,14 +105,65 @@ func (f *Files) List(ctx context.Context, ownerID uuid.UUID, parentID *uuid.UUID
 	return f.store.ListChildren(ctx, ownerID, parentID)
 }
 
-// Rename 改名。
-func (f *Files) Rename(ctx context.Context, ownerID, id uuid.UUID, name string) (model.Node, error) {
+// CreateDir 新建文件夹。文件与文件夹同表，所以和 Upload 只差 is_dir/size/blob 三个字段。
+func (f *Files) CreateDir(ctx context.Context, ownerID uuid.UUID, parentID *uuid.UUID, name string) (model.Node, error) {
 	name, err := cleanName(name)
 	if err != nil {
 		return model.Node{}, err
 	}
+	if err := f.checkParent(ctx, ownerID, parentID); err != nil {
+		return model.Node{}, err
+	}
 
-	node, err := f.store.RenameNode(ctx, ownerID, id, name)
+	node, err := f.store.CreateNode(ctx, ownerID, parentID, name, true, 0, nil)
+	if errors.Is(err, repository.ErrUniqueViolation) {
+		return model.Node{}, ErrNameConflict
+	}
+	if err != nil {
+		return model.Node{}, err
+	}
+	return node, nil
+}
+
+// UpdateInput 是 PATCH /files/{id} 的一次修改，两个字段都可选。
+type UpdateInput struct {
+	Name      *string // 非 nil → 改名
+	SetParent bool    // true → 移动（ParentID 为 nil 表示移回根目录）
+	ParentID  *uuid.UUID
+}
+
+// Update 改名和/或移动一个节点。
+//
+// 顺序很重要：先确认目标目录真实存在且是目录，再做环检测，最后才写库。
+func (f *Files) Update(ctx context.Context, ownerID, id uuid.UUID, in UpdateInput) (model.Node, error) {
+	var name *string
+	if in.Name != nil {
+		cleaned, err := cleanName(*in.Name)
+		if err != nil {
+			return model.Node{}, err
+		}
+		name = &cleaned
+	}
+
+	if in.SetParent {
+		if err := f.checkParent(ctx, ownerID, in.ParentID); err != nil {
+			return model.Node{}, err
+		}
+
+		// —— D2 的环检测。移到根目录（ParentID == nil）不可能成环，跳过。
+		// 下面这个判断背后的 store 方法在 repository/nodes.go 里，留给你实现。
+		if in.ParentID != nil {
+			cycle, err := f.store.IsSelfOrDescendant(ctx, ownerID, *in.ParentID, id)
+			if err != nil {
+				return model.Node{}, err
+			}
+			if cycle {
+				return model.Node{}, ErrCycle
+			}
+		}
+	}
+
+	node, err := f.store.UpdateNode(ctx, ownerID, id, name, in.ParentID, in.SetParent)
 	switch {
 	case errors.Is(err, repository.ErrUniqueViolation):
 		return model.Node{}, ErrNameConflict
@@ -124,12 +175,15 @@ func (f *Files) Rename(ctx context.Context, ownerID, id uuid.UUID, name string) 
 	return node, nil
 }
 
-// Delete 弱删节点（只打 deleted_at）。
+// Delete 弱删节点：删文件夹时**连整棵子树一起**（D2 定的语义）。
+//
+// 一条递归 CTE 在数据库里标记完整棵树，文件就是"只有自己一个节点的子树"，
+// 所以文件和文件夹共用同一条路径。
 //
 // 故意不回收磁盘内容：判断"这份内容还有没有别人在用"需要引用计数，
-// 那是 D3 的工作。现在的行为是"文件从列表里消失，但内容还在盘上"。
+// 那是 D3 的工作。现在的行为是"从列表里消失，但内容还在盘上"。
 func (f *Files) Delete(ctx context.Context, ownerID, id uuid.UUID) error {
-	if err := f.store.SoftDeleteNode(ctx, ownerID, id); err != nil {
+	if err := f.store.SoftDeleteSubtree(ctx, ownerID, id); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return ErrNotFound
 		}

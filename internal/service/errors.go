@@ -17,6 +17,8 @@ var (
 	ErrNameConflict = errors.New("another entry with the same name already exists here")
 	// ErrNotAFile 下载目标是个文件夹。
 	ErrNotAFile = errors.New("target is a folder, not a file")
+	// ErrCycle 移动会让文件树成环：把文件夹移进它自己或它自己的子孙里。
+	ErrCycle = errors.New("cannot move a folder into itself or its own subdirectory")
 )
 
 // ValidationError 携带一句可以直接给用户看的说明（参数不合法，不是内部故障）。
