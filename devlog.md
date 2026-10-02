@@ -123,7 +123,7 @@
     `CASE WHEN $4 THEN $5::uuid ELSE parent_id END`，让"改哪几列"由开关决定。
   - `DELETE /api/v1/files/{id}` 改成**级联**：一条递归 CTE 弱删整棵子树。文件和文件夹共用同一条路径
     —— 文件就是"只含自己一个节点的子树"。
-- **环检测**（D2 的难点，自己写）：`repository.IsSelfOrDescendant` —— 一条**往上爬**的递归 CTE，
+- **环检测**（D2 的难点）：`repository.IsSelfOrDescendant` —— 一条**往上爬**的递归 CTE，
   从目标目录沿 `parent_id` 走到根，看路上有没有被移的那个节点。命中 → `ErrCycle` → HTTP **409**。
 - `internal/repository/nodes_test.go`：打**真数据库**的集成测试（库连不上时 Skip，不是 FAIL）。
 
@@ -142,10 +142,10 @@
 1. 往上爬和往下爬只差一个 JOIN：往下 `n.parent_id = x.id`，往上 `n.id = x.parent_id`。
 2. 递归 CTE 用 `UNION ALL`；往上那条还加了 `CYCLE id SET is_cycle USING path`（PG 14+）——
    万一数据里本来就有环，查询会停下来而不是无限递归。（往下爬的 `SoftDeleteSubtree` 还没加。）
-3. **409 有两种来源（环拒 / 重名），状态码一样，只有 body 能分** —— 99 和 95 就是它俩的指纹。
+3. **409 有两种来源（环拒 / 重名），状态码一样，只有 body 能分** —— 99 和 95 就是它俩的区分依据。
 
 **下一步**
 
-- D3（10/4，P5 多用户 + 秒传，最难的一天）：内容寻址（hash → blob）+ **引用计数**决定
+- D3（10/4，P5 多用户 + 秒传）：内容寻址（hash → blob）+ **引用计数**决定
   "最后一个引用消失才真删"。判据：两个用户传**同一个文件**，第二次瞬间完成且磁盘占用不变；
   两边都删掉后 blob 才消失。
