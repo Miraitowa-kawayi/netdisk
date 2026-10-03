@@ -68,10 +68,6 @@ DELETE FROM blobs
 	return tag.RowsAffected() > 0, nil
 }
 
-// ===========================================================================
-//  以下是 D3 的引用计数核心 —— 留给你写。契约在注释里，验证命令见文件末尾。
-// ===========================================================================
-
 // ReclaimOrphanBlobs 回收一次删除所波及的内容，返回可以从磁盘上删掉的 storage_key。
 //
 // rootID 是**刚刚被 SoftDeleteSubtree 弱删掉**的子树根。两步：
@@ -98,5 +94,44 @@ DELETE FROM blobs
 // RETURNING storage_key` 可以在一条 SQL 里做完；起点用 `id = $1 AND owner_id = $2`，
 // 往下扩展用 `JOIN ... ON n.parent_id = s.id`。
 func (s *Store) ReclaimOrphanBlobs(ctx context.Context, ownerID, rootID uuid.UUID) ([]string, error) {
-	return nil, ErrNotImplemented
+	query := `
+	WITH RECURSIVE subtree AS (
+	    SELECT id, blob_id
+		FROM nodes
+		WHERE id = $1 AND owner_id = $2
+	    UNION ALL
+	    SELECT n.id, n.blob_id
+		FROM nodes n
+		JOIN subtree s ON n.parent_id = s.id
+	),
+	victims AS (
+	    SELECT DISTINCT blob_id
+		FROM subtree
+		WHERE blob_id IS NOT NULL
+	)
+	DELETE FROM blobs
+	WHERE id IN (SELECT blob_id FROM victims)
+	  AND NOT EXISTS (
+	  SELECT 1
+	  FROM nodes
+	  WHERE nodes.blob_id = blobs.id AND nodes.deleted_at IS NULL
+	)
+	RETURNING storage_key`
+	keys := make([]string, 0)
+	rows, err := s.pool.Query(ctx, query, rootID, ownerID)
+	if err != nil && err != pgx.ErrNoRows {
+		return nil, translate(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, translate(err)
+		}
+		keys = append(keys, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, translate(err)
+	}
+	return keys, nil
 }
