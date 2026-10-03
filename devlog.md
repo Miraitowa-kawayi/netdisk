@@ -158,7 +158,7 @@
   `nodes`、零字节传输；库里没这个 hash → 404，`size` 和 blob 对不上 → 400。
 - `DELETE /api/v1/files/{id}` 接上回收：先级联弱删整棵子树，再 `ReclaimOrphanBlobs` 拿回可以删的
   `storage_key`，逐个 `storage.Delete`。回收失败只打 WARN、仍回 204 —— 弱删已经提交，翻 500 是撒谎。
-- **`ReclaimOrphanBlobs`（D3 的难点，自己写、Agent review）**：一条 SQL —— 递归 CTE 展开**刚被弱删**
+- **`ReclaimOrphanBlobs`（D3 的难点，代码本人写的、由Agent review）**：一条 SQL —— 递归 CTE 展开**刚被弱删**
   的子树 → 收集 distinct 的 `blob_id` → `DELETE FROM blobs ... WHERE NOT EXISTS (存活引用) RETURNING storage_key`。
 - `migrations/0002`：`nodes.blob_id` 外键改 `ON DELETE SET NULL`，删 blob 行时自动清掉节点上的指针。
 
