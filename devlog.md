@@ -149,3 +149,35 @@
 - D3（10/4，P5 多用户 + 秒传）：内容寻址（hash → blob）+ **引用计数**决定
   "最后一个引用消失才真删"。判据：两个用户传**同一个文件**，第二次瞬间完成且磁盘占用不变；
   两边都删掉后 blob 才消失。
+
+## 2026-10-03 · D3 秒传 + 引用计数：内容回收
+
+**做了什么**
+
+- 秒传 `POST /api/v1/files/instant`（JSON `{name,parent_id,hash,size}`）：命中已有内容就只插一行
+  `nodes`、零字节传输；库里没这个 hash → 404，`size` 和 blob 对不上 → 400。
+- `DELETE /api/v1/files/{id}` 接上回收：先级联弱删整棵子树，再 `ReclaimOrphanBlobs` 拿回可以删的
+  `storage_key`，逐个 `storage.Delete`。回收失败只打 WARN、仍回 204 —— 弱删已经提交，翻 500 是撒谎。
+- **`ReclaimOrphanBlobs`（D3 的难点，自己写、Agent review）**：一条 SQL —— 递归 CTE 展开**刚被弱删**
+  的子树 → 收集 distinct 的 `blob_id` → `DELETE FROM blobs ... WHERE NOT EXISTS (存活引用) RETURNING storage_key`。
+- `migrations/0002`：`nodes.blob_id` 外键改 `ON DELETE SET NULL`，删 blob 行时自动清掉节点上的指针。
+
+**判据（实测）**
+
+| 验的什么 | 结果 |
+| --- | --- |
+| `internal/repository/blobs_test.go` 5 条（打真库，非 SKIP） | 5/5 PASS |
+| D2 那 7 条（没被碰坏） | 7/7 PASS |
+| 端到端：同一内容两个引用，删掉其中一个 | **204**，blob 行仍 1、盘上文件不动 |
+| 端到端：删掉最后一个引用 | **204**，blob 行 → 0、盘上文件被删，日志无 WARN |
+
+**卡在哪 / 踩到的坑**
+
+1. 展开子树那段**不能**带 `deleted_at IS NULL`：要回收的节点刚被弱删，带了就一行都查不到。
+2. 存活判定**不能**带 `owner_id`：必须全局看，别人还在用的内容绝不能删。
+3. 第一版编不过：写成 `s.db.QueryContext(...)` —— 本包 `Store` 只有 `pool` 字段，且 pgx v5 的方法名
+   是 `Query`（没有 `QueryContext`）。又把 `database/sql` 的习惯带过来了。
+
+**下一步**
+
+- D4：分片续传状态机。判据：拆成分片上传、中断后能接着传，最终合并出的文件与整传一致。
