@@ -67,7 +67,7 @@ func run(logger *slog.Logger) error {
 
 	tokens := service.NewTokens(cfg.JWTSecret, cfg.JWTTTL)
 	auth := service.NewAuth(store, tokens)
-	files := service.NewFiles(store, blobStore, cfg.StorageDriver)
+	files := service.NewFiles(store, blobStore, cfg.StorageDriver, logger)
 
 	srv := &http.Server{
 		Addr: cfg.Addr,

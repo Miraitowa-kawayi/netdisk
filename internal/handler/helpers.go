@@ -44,6 +44,9 @@ func (s *Server) failService(w http.ResponseWriter, r *http.Request, err error) 
 		httpx.Fail(w, r, s.deps.Logger, httpx.Unauthorized(err.Error()))
 	case errors.Is(err, service.ErrNotFound):
 		httpx.Fail(w, r, s.deps.Logger, httpx.NotFound(err.Error()))
+	case errors.Is(err, service.ErrContentNotStored):
+		// 秒传命中失败：服务端没有这份内容 —— 不是"参数格式错"，是"你要的东西这里没有"。
+		httpx.Fail(w, r, s.deps.Logger, httpx.NotFound(err.Error()))
 	case errors.Is(err, service.ErrNotAFile):
 		httpx.Fail(w, r, s.deps.Logger, httpx.Invalid(err.Error()))
 	default:

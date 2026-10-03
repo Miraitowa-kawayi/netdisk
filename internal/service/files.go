@@ -2,9 +2,12 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"path"
 	"strings"
 	"time"
@@ -22,10 +25,11 @@ type Files struct {
 	store   *repository.Store
 	storage storage.Storage
 	backend string // 写进 blobs.backend，local | s3
+	logger  *slog.Logger
 }
 
-func NewFiles(store *repository.Store, st storage.Storage, backend string) *Files {
-	return &Files{store: store, storage: st, backend: backend}
+func NewFiles(store *repository.Store, st storage.Storage, backend string, logger *slog.Logger) *Files {
+	return &Files{store: store, storage: st, backend: backend, logger: logger}
 }
 
 // UploadInput 是一次上传。Body 是**还没被读完的请求体** ——
@@ -94,6 +98,58 @@ func (f *Files) cleanupBlob(ctx context.Context, blobID uuid.UUID, storageKey st
 		return // 还有别的节点引用它，对象不能删
 	}
 	_ = f.storage.Delete(ctx, storageKey)
+}
+
+// InstantInput 是一次"秒传"请求：客户端声称本地文件的 SHA-256 是 Hash，
+// 服务端如果已经有这份内容，就一个字节都不收，直接建节点。
+type InstantInput struct {
+	OwnerID  uuid.UUID
+	ParentID *uuid.UUID // nil = 根目录
+	Name     string
+	Hash     string // 客户端算好的 SHA-256（十六进制，大小写都收）
+	Size     int64  // 只作参照；真实大小以库里 blob.size 为准
+}
+
+// InstantUpload 秒传：按内容 hash 命中已有 blob 就直接建节点。
+//
+// 和 Upload 的区别：Upload 是"边收边写、写完了再看内容是不是早就有"，
+// 秒传是"客户端先算好 hash 报上来"，所以命中的话网络上一个字节都不动 ——
+// 第二个用户传同一个文件才会"瞬间完成"且磁盘不增长。
+//
+// size 不听客户端的：内容的事实来源是 blobs.size。客户端报的 size 只用来
+// 早期发现"hash 对了但 size 差很多"这种明显不一致，不改写库的值。
+func (f *Files) InstantUpload(ctx context.Context, in InstantInput) (model.Node, error) {
+	name, err := cleanName(in.Name)
+	if err != nil {
+		return model.Node{}, err
+	}
+	hash, err := cleanHash(in.Hash)
+	if err != nil {
+		return model.Node{}, err
+	}
+	if err := f.checkParent(ctx, in.OwnerID, in.ParentID); err != nil {
+		return model.Node{}, err
+	}
+
+	blob, err := f.store.GetBlobByHash(ctx, hash)
+	if errors.Is(err, repository.ErrNotFound) {
+		return model.Node{}, ErrContentNotStored
+	}
+	if err != nil {
+		return model.Node{}, err
+	}
+	if in.Size > 0 && in.Size != blob.Size {
+		return model.Node{}, invalid("size 与已存内容的实际大小不符")
+	}
+
+	node, err := f.store.CreateNode(ctx, in.OwnerID, in.ParentID, name, false, blob.Size, &blob.ID)
+	if errors.Is(err, repository.ErrUniqueViolation) {
+		return model.Node{}, ErrNameConflict
+	}
+	if err != nil {
+		return model.Node{}, err
+	}
+	return node, nil
 }
 
 // List 列目录的直接子项。目录不存在（或不是文件夹）时返回错误而不是空列表，
@@ -180,14 +236,31 @@ func (f *Files) Update(ctx context.Context, ownerID, id uuid.UUID, in UpdateInpu
 // 一条递归 CTE 在数据库里标记完整棵树，文件就是"只有自己一个节点的子树"，
 // 所以文件和文件夹共用同一条路径。
 //
-// 故意不回收磁盘内容：判断"这份内容还有没有别人在用"需要引用计数，
-// 那是 D3 的工作。现在的行为是"从列表里消失，但内容还在盘上"。
+// 删完再回收内容（D3 的引用计数）：这次删除可能让某些 blob "最后一个引用消失"，
+// 那才是真正该从磁盘上删掉的时候。回收逻辑在 store.ReclaimOrphanBlobs。
+//
+// 顺序和容错是刻意的：先弱删（这一步成功 = 用户看到的删除已经生效、已提交），
+// 再回收。所以回收失败**不把整个请求判成失败** —— 那会让客户端以为没删掉，
+// 而实际语义只是"内容多留了一会儿"（可重试、不违反任何承诺）。失败只留日志。
 func (f *Files) Delete(ctx context.Context, ownerID, id uuid.UUID) error {
 	if err := f.store.SoftDeleteSubtree(ctx, ownerID, id); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			return ErrNotFound
 		}
 		return err
+	}
+
+	keys, err := f.store.ReclaimOrphanBlobs(ctx, ownerID, id)
+	if err != nil {
+		f.logger.Warn("reclaim orphan blobs after delete", "node_id", id, "error", err)
+		return nil
+	}
+	for _, key := range keys {
+		if err := f.storage.Delete(ctx, key); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			// DB 行已删，对象没删掉 → 只是漏在盘上（下次覆盖同一 hash 会重新写一份新的），
+			// 不影响任何读路径。
+			f.logger.Warn("delete reclaimed object", "key", key, "error", err)
+		}
 	}
 	return nil
 }
@@ -270,4 +343,15 @@ func cleanName(raw string) (string, error) {
 		return "", invalid("文件名最长 %d 字节", maxNameLen)
 	}
 	return name, nil
+}
+
+// cleanHash 校验客户端报上来的 SHA-256：hex、32 字节，大小写都收（统一转小写，
+// 因为 blobs.content_hash 存的就是十六进制小写）。
+func cleanHash(raw string) (string, error) {
+	h := strings.ToLower(strings.TrimSpace(raw))
+	b, err := hex.DecodeString(h)
+	if err != nil || len(b) != sha256.Size {
+		return "", invalid("hash 必须是 64 位十六进制的 SHA-256")
+	}
+	return h, nil
 }

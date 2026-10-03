@@ -67,3 +67,36 @@ DELETE FROM blobs
 	}
 	return tag.RowsAffected() > 0, nil
 }
+
+// ===========================================================================
+//  以下是 D3 的引用计数核心 —— 留给你写。契约在注释里，验证命令见文件末尾。
+// ===========================================================================
+
+// ReclaimOrphanBlobs 回收一次删除所波及的内容，返回可以从磁盘上删掉的 storage_key。
+//
+// rootID 是**刚刚被 SoftDeleteSubtree 弱删掉**的子树根。两步：
+//
+//  1. 沿 parent_id 把 rootID 这棵子树展开，收集里面的文件节点引用过的 blob（按 id 去重；
+//     目录的 blob_id 是 NULL，要排除）。⚠️ 这些行此刻的 deleted_at **已经非空**，
+//     所以这一步不能像别处那样带 `deleted_at IS NULL`，否则一行都查不到。
+//  2. 只删其中"现在已经没有任何**存活**节点引用"的 blob 行。
+//     存活判定必须**全局**看（不带 owner_id），不能只看这棵子树：
+//     别人目录里、别的用户那边还有人在用的内容绝不能删。
+//
+// 返回被删掉的那些 blob 的 storage_key —— 调用方据此删磁盘对象。
+// 节点那一侧的 blob_id 指针由外键 `ON DELETE SET NULL` 自动清掉（见 migrations/0002）。
+// 没有可回收的内容时返回空切片 + nil —— 删一个空文件夹不是错误。
+//
+// 必须满足（internal/repository/blobs_test.go 会逐条验）：
+//  1. 子树里唯一引用某内容的文件被删 → 该 blob 行消失、它的 key 出现在返回值里；
+//  2. 同一个 blob 在子树里被多个文件引用 → key 只出现一次；
+//  3. 子树外还有存活节点引用同一 blob → 一行都不删，返回空；
+//  4. 空目录 → 空切片 + nil；
+//  5. 别的 owner 的存活节点引用同一 blob → 同样不删。
+//
+// 提示：`WITH RECURSIVE ... , victims AS ( SELECT DISTINCT ... ) DELETE FROM blobs ...
+// RETURNING storage_key` 可以在一条 SQL 里做完；起点用 `id = $1 AND owner_id = $2`，
+// 往下扩展用 `JOIN ... ON n.parent_id = s.id`。
+func (s *Store) ReclaimOrphanBlobs(ctx context.Context, ownerID, rootID uuid.UUID) ([]string, error) {
+	return nil, ErrNotImplemented
+}

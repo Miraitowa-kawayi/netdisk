@@ -19,6 +19,8 @@ var (
 	ErrNotAFile = errors.New("target is a folder, not a file")
 	// ErrCycle 移动会让文件树成环：把文件夹移进它自己或它自己的子孙里。
 	ErrCycle = errors.New("cannot move a folder into itself or its own subdirectory")
+	// ErrContentNotStored 秒传时服务端没有这个 hash 的内容 —— 客户端得老实传一遍。
+	ErrContentNotStored = errors.New("no content with that hash is stored here")
 )
 
 // ValidationError 携带一句可以直接给用户看的说明（参数不合法，不是内部故障）。

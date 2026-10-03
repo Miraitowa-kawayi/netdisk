@@ -68,6 +68,7 @@ func NewRouter(deps Deps) http.Handler {
 			r.Use(requireAuth)
 			r.Post("/", s.uploadFile)               // multipart，全程流式
 			r.Post("/dirs", s.createDir)            // 新建文件夹（JSON）
+			r.Post("/instant", s.instantUpload)     // 秒传：报 hash，命中就不收字节（JSON）
 			r.Get("/", s.listFiles)                 // ?parent_id=<uuid>|root
 			r.Get("/{id}/download", s.downloadFile) // ServeContent → Range/206 白送
 			r.Patch("/{id}", s.patchFile)           // 改名和/或移动，看给了哪个字段

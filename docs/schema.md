@@ -36,6 +36,18 @@ DDL 在 [`migrations/0001_init.sql`](../migrations/0001_init.sql)。这里记录
 是一个排查起来很痛苦的坑。如果以后真有 GC 压不动的那天，再在上层加计数缓存，而不是让它
 成为事实来源。
 
+### 收尾时那个外键（0002 号迁移）
+
+"现算"这条路的最后一步是 `DELETE FROM blobs`，这时会撞上 `nodes.blob_id → blobs.id`
+的外键：已弱删的 `nodes` 行仍然握着 `blob_id`，外键（默认 NO ACTION）会直接挡下删除。
+所以 0002 号迁移把它改成 `ON DELETE SET NULL` —— blob 行消失时，指向它的指针自动变 NULL。
+
+安全性由回收 SQL 自己保证，不是靠外键：只有 `NOT EXISTS (SELECT 1 FROM nodes WHERE
+blob_id = ? AND deleted_at IS NULL)` 的行才会被删，**存活引用一行都不会被误伤**。
+外键在这里只负责"消灭悬空指针"，不负责判断该不该删。这也顺带说明了为什么回收要
+**限定在这次被删的子树里**，而不是"扫全库删所有没有被引用的 blob"——后者会误删
+一个刚 `UpsertBlob` 完、节点还没来得及插进去的并发上传（那是一段没有引用的合法窗口）。
+
 ## 4. 根目录的重名：唯一索引里的 NULL 陷阱
 
 同层不能重名，直觉写法是：

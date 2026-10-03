@@ -257,6 +257,52 @@ func (s *Server) createDir(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"node": node})
 }
 
+// instantUploadRequest 是 POST /files/instant 的请求体。
+// hash 是客户端对**本地文件**算好的 SHA-256（hex）；服务端命中就一个字节都不收。
+type instantUploadRequest struct {
+	Name     string `json:"name"`
+	ParentID string `json:"parent_id"`
+	Hash     string `json:"hash"`
+	Size     int64  `json:"size"`
+}
+
+// instantUpload 秒传：客户端报 hash，服务端已有这份内容就直接建节点（只插一行 nodes）。
+//
+// 命中要求内容**已经**在库里（别人传过或自己传过）；没有 → 404，客户端回到
+// 普通 multipart 上传路径把字节传一遍。响应里带 "instant": true 是给演示/客户端
+// 一个明确的信号："这次真的一个字节都没传"。
+func (s *Server) instantUpload(w http.ResponseWriter, r *http.Request) {
+	uid, ok := userID(r)
+	if !ok {
+		httpx.Fail(w, r, s.deps.Logger, httpx.Unauthorized("authentication required"))
+		return
+	}
+
+	var req instantUploadRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		httpx.Fail(w, r, s.deps.Logger, httpx.Invalid("请求体不是合法的 JSON").With(err))
+		return
+	}
+	parentID, err := parseParentID(req.ParentID)
+	if err != nil {
+		httpx.Fail(w, r, s.deps.Logger, httpx.Invalid(err.Error()))
+		return
+	}
+
+	node, err := s.deps.Files.InstantUpload(r.Context(), service.InstantInput{
+		OwnerID:  uid,
+		ParentID: parentID,
+		Name:     req.Name,
+		Hash:     req.Hash,
+		Size:     req.Size,
+	})
+	if err != nil {
+		s.failService(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"node": node, "instant": true})
+}
+
 // patchNodeRequest 是 PATCH /files/{id} 的请求体。
 //
 // ParentID 用 json.RawMessage 是为了区分 JSON 里三种不同的情况 ——
