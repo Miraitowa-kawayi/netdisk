@@ -181,3 +181,50 @@
 **下一步**
 
 - D4：分片续传状态机。判据：拆成分片上传、中断后能接着传，最终合并出的文件与整传一致。
+
+## 2026-10-04 · D4 分片续传：分片上传 + 收尾状态机
+
+**做了什么**
+
+- 分片上传六个端点：`POST /api/v1/uploads`（开会话）、`GET /api/v1/uploads`（列还没收尾的会话）、
+  `GET /api/v1/uploads/{id}`（进度：已收到哪些片、还缺哪些）、
+  `PUT /api/v1/uploads/{id}/parts/{part_no}`（传一片，请求体就是原始字节，流式写盘）、
+  `POST /api/v1/uploads/{id}/complete`（收尾合并）、`DELETE /api/v1/uploads/{id}`（放弃并清分片）。
+- 状态走 D0 就建好的两张表（`upload_sessions` / `upload_parts`），不用新迁移。分片主键
+  `(session_id, part_no)`，所以重传同一片是幂等 upsert —— 这是断点续传能工作的原因。
+  `part_no` 从 0 开始，每片大小强校验（必须正好等于 `chunk_size`，最后一片是余数）。
+- `storage.Concat`：把多个分片对象按给定顺序拼成一个新对象（临时文件 → `Sync` → `Rename`，
+  和 `Put` 同一套路），边拼边算整份内容的 SHA-256。
+- **`Uploads.Complete`（D4 的难点，自己写、Agent review）**：状态前置检查（非 pending → 409、
+  别人的会话 → 404）→ 清点缺片（缺 → 409，且不建节点、不删分片）→ 按 `part_no` 升序 `Concat` →
+  `UpsertBlob`（命中已有内容就删掉刚拼的副本）→ `CreateNode`（撞唯一索引收回刚登记的行与对象，
+  再翻同名冲突）→ `TransitionUploadSession` 推到 completed → 清掉分片对象。
+
+**判据（实测）**
+
+| 验的什么 | 结果 |
+| --- | --- |
+| `internal/service/uploads_test.go` 7 条（打真库，非 SKIP） | 7/7 PASS |
+| `internal/storage/concat_test.go` 4 条 | 4/4 PASS |
+| `go test ./...`（repository / service / storage） | 全绿 |
+| 端到端：只传 0、2 两片，查进度 | `received=[0,2] missing=[1]` |
+| 端到端：缺片就收尾 | **409**（missing one or more parts） |
+| 端到端：补齐第 1 片后收尾 | **201**，`node.size=3000` |
+| 端到端：下载合并结果 | sha256 与原始一致、逐字节相同 |
+| 端到端：Range `bytes=1000-1999` | **206** + `Content-Range: bytes 1000-1999/3000`，体 1000 字节 |
+| 端到端：收尾后盘上分片 | 0 个文件残留 |
+
+**卡在哪 / 踩到的坑**
+
+1. 两个实参顺序写反了：`UpsertBlob` 是 `(hash, size, backend, storageKey)`，`CreateNode` 是
+   `(…, isDir, size, blobID)`。居然顺序不一样也会编译不过，的确值得注意
+2. 同名冲突那条契约要三件事一起做：翻 `ErrNameConflict`、把刚登记的 blob 行收回、删掉刚拼出来的
+   那份副本 —— 且"收回"只在这次真插了新行时做，否则会删到别人的内容。
+3. 拼接顺序是**调用方**的责任（`Concat` 那层不认识 `part_no`）：必须靠 `ListUploadParts` 的
+   `ORDER BY part_no`，不能按到达顺序拼。
+
+**下一步**
+
+- P4 分享链接（必做，还没做）：先做"创建 + 匿名访问"两条路径。
+- 有余力：P8 文件夹打包下载（`archive/zip` + `io.Pipe` 流式不落盘）、P6 对象存储。
+- 收尾：补关键路径测试、README、把演示彩排一遍。
