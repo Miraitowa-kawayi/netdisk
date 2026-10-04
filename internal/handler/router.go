@@ -22,6 +22,7 @@ type Deps struct {
 	Auth    *service.Auth
 	Files   *service.Files
 	Uploads *service.Uploads
+	Shares  *service.Shares
 }
 
 // Server 持有依赖，各 handler 是它的方法。
@@ -86,6 +87,17 @@ func NewRouter(deps Deps) http.Handler {
 			r.Post("/{id}/complete", s.completeUpload)      // 收尾：按序合并 + 建节点
 			r.Delete("/{id}", s.abortUpload)                // 放弃：清理分片
 		})
+
+		// P4 分享：管理要登录；匿名访问走 /share/{token}，故意**不挂** requireAuth ——
+		// 拿着 token 的人就是被授权的人（校验在 service 里做）。
+		r.Route("/shares", func(r chi.Router) {
+			r.Use(requireAuth)
+			r.Post("/", s.createShare)       // 建：{node_id, expires_in_seconds?}
+			r.Get("/", s.listShares)         // 列我建过的
+			r.Delete("/{id}", s.deleteShare) // 撤销
+		})
+		r.Get("/share/{token}", s.resolveShare)              // 匿名打开（文件/文件夹元信息）
+		r.Get("/share/{token}/download", s.downloadViaShare) // 匿名下载（?node_id= 指定子项）
 	})
 
 	return r

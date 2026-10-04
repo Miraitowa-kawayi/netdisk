@@ -69,6 +69,7 @@ func run(logger *slog.Logger) error {
 	auth := service.NewAuth(store, tokens)
 	files := service.NewFiles(store, blobStore, cfg.StorageDriver, logger)
 	uploads := service.NewUploads(store, blobStore, cfg.StorageDriver, logger)
+	shares := service.NewShares(store, files, logger)
 
 	srv := &http.Server{
 		Addr: cfg.Addr,
@@ -79,6 +80,7 @@ func run(logger *slog.Logger) error {
 			Auth:    auth,
 			Files:   files,
 			Uploads: uploads,
+			Shares:  shares,
 		}),
 		// 只限制读请求头的时间，防止慢速连接占坑；
 		// 不设 ReadTimeout / WriteTimeout —— 上传下载都是大体积长连接，设了必然中途掐断。
