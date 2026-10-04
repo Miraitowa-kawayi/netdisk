@@ -303,20 +303,7 @@ func (f *Files) OpenDownload(ctx context.Context, ownerID, id uuid.UUID) (Downlo
 
 // checkParent 确认父目录存在、属于自己、且真的是个目录。
 func (f *Files) checkParent(ctx context.Context, ownerID uuid.UUID, parentID *uuid.UUID) error {
-	if parentID == nil {
-		return nil // 根目录，永远存在
-	}
-	parent, err := f.store.GetNode(ctx, ownerID, *parentID)
-	if errors.Is(err, repository.ErrNotFound) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if !parent.IsDir {
-		return invalid("parent_id 指向的不是文件夹")
-	}
-	return nil
+	return checkParentDir(ctx, f.store, ownerID, parentID)
 }
 
 // countingReader 数实际读过去的字节数 —— 上传前拿不到文件大小，

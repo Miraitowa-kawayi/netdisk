@@ -40,6 +40,9 @@ func (s *Server) failService(w http.ResponseWriter, r *http.Request, err error) 
 	case errors.Is(err, service.ErrCycle):
 		// 移动成环：请求与当前资源状态冲突，不是参数格式错 —— 所以是 409 不是 400。
 		httpx.Fail(w, r, s.deps.Logger, httpx.Conflict(err.Error()))
+	case errors.Is(err, service.ErrUploadNotPending), errors.Is(err, service.ErrUploadIncomplete):
+		// 会话状态不对（已完成/已放弃）或分片没传齐 —— 都是"当前资源状态不允许这个请求"，409。
+		httpx.Fail(w, r, s.deps.Logger, httpx.Conflict(err.Error()))
 	case errors.Is(err, service.ErrInvalidCredentials):
 		httpx.Fail(w, r, s.deps.Logger, httpx.Unauthorized(err.Error()))
 	case errors.Is(err, service.ErrNotFound):

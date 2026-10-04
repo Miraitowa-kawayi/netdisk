@@ -21,6 +21,10 @@ var (
 	ErrCycle = errors.New("cannot move a folder into itself or its own subdirectory")
 	// ErrContentNotStored 秒传时服务端没有这个 hash 的内容 —— 客户端得老实传一遍。
 	ErrContentNotStored = errors.New("no content with that hash is stored here")
+	// ErrUploadNotPending 分片会话不在 pending 状态（已完成或已放弃）—— 不能再传分片/收尾。
+	ErrUploadNotPending = errors.New("upload session is no longer pending")
+	// ErrUploadIncomplete 收尾时会话还缺分片 —— 客户端要先把缺的补上再收尾。
+	ErrUploadIncomplete = errors.New("upload session is missing one or more parts")
 )
 
 // ValidationError 携带一句可以直接给用户看的说明（参数不合法，不是内部故障）。

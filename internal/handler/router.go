@@ -16,11 +16,12 @@ import (
 
 // Deps 是 HTTP 层需要的依赖。
 type Deps struct {
-	Cfg    *config.Config
-	Logger *slog.Logger
-	Store  *repository.Store
-	Auth   *service.Auth
-	Files  *service.Files
+	Cfg     *config.Config
+	Logger  *slog.Logger
+	Store   *repository.Store
+	Auth    *service.Auth
+	Files   *service.Files
+	Uploads *service.Uploads
 }
 
 // Server 持有依赖，各 handler 是它的方法。
@@ -73,6 +74,17 @@ func NewRouter(deps Deps) http.Handler {
 			r.Get("/{id}/download", s.downloadFile) // ServeContent → Range/206 白送
 			r.Patch("/{id}", s.patchFile)           // 改名和/或移动，看给了哪个字段
 			r.Delete("/{id}", s.deleteFile)         // 弱删；文件夹连整棵子树
+		})
+
+		// P7 断点续传：分片上传的状态机在 /uploads 下。
+		r.Route("/uploads", func(r chi.Router) {
+			r.Use(requireAuth)
+			r.Post("/", s.createUpload)                     // 开会话：name / parent_id / total_size / chunk_size
+			r.Get("/", s.listUploads)                       // 列 pending 会话（丢了 session id 时找回）
+			r.Get("/{id}", s.uploadSessionStatus)           // 进度：已收到 / 还缺哪些片
+			r.Put("/{id}/parts/{part_no}", s.putUploadPart) // 传一片（原始字节，流式）
+			r.Post("/{id}/complete", s.completeUpload)      // 收尾：按序合并 + 建节点
+			r.Delete("/{id}", s.abortUpload)                // 放弃：清理分片
 		})
 	})
 

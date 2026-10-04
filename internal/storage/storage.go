@@ -34,6 +34,13 @@ type Storage interface {
 	// 能直接拿到 Range 支持（它需要 Seek 来定位区间）。
 	Open(ctx context.Context, key string) (io.ReadSeekCloser, ObjectInfo, error)
 
+	// Concat 把 srcKeys 里的对象按**给定顺序**拼成一个新对象 dstKey，
+	// 返回新对象的 (SHA-256, 总字节数)。全程流式：一次只读一个源对象，
+	// 内存不随总大小涨。任一源对象不存在 → ErrNotFound，且最终路径上不留半成品。
+	//
+	// 顺序由调用方负责 —— 这一层只管"你给的顺序，我照着接"。
+	Concat(ctx context.Context, dstKey string, srcKeys []string) (hash string, size int64, err error)
+
 	// Delete 删除对象。对象不存在时返回 ErrNotFound。
 	Delete(ctx context.Context, key string) error
 

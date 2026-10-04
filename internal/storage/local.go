@@ -175,6 +175,71 @@ func (l *Local) Stat(ctx context.Context, key string) (ObjectInfo, error) {
 	return ObjectInfo{Key: key, Size: fi.Size()}, nil
 }
 
+// Concat 把 srcKeys 里的对象按给定顺序拼成一个新对象 dstKey，边拼边算 SHA-256。
+//
+// 和 Put 是同一个套路（临时文件 → Sync → Close → Rename），区别是"源"从**一个 Reader**
+// 变成**一串已存在的对象**：逐个 Open、读出、写进同一个 MultiWriter。一次只开一个源文件，
+// 所以内存和文件描述符都不随分片数涨。任一源对象不存在 → ErrNotFound，
+// 中途失败时最终路径上不留半成品（临时文件建在目标目录，defer 清掉）。
+//
+// 这是 D4 分片上传收尾要用的原语：把 uploads/<session>/<n> 按 n 的顺序接起来。
+func (l *Local) Concat(ctx context.Context, dstKey string, srcKeys []string) (string, int64, error) {
+	destPath, err := l.keyPath(dstKey)
+	if err != nil {
+		return "", 0, err
+	}
+	dir := filepath.Dir(destPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", 0, err
+	}
+
+	tempFile, err := os.CreateTemp(dir, ".concat-*")
+	if err != nil {
+		return "", 0, fmt.Errorf("storage: create temp file: %w", err)
+	}
+
+	var success bool
+	defer func() {
+		if !success {
+			tempFile.Close()
+			os.Remove(tempFile.Name())
+		}
+	}()
+
+	hasher := sha256.New()
+	mw := io.MultiWriter(tempFile, hasher)
+
+	var total int64
+	for _, key := range srcKeys {
+		if err := ctx.Err(); err != nil {
+			return "", 0, err
+		}
+		src, _, err := l.Open(ctx, key)
+		if err != nil {
+			return "", 0, err // 源不存在 → 直接是 ErrNotFound，不留半成品
+		}
+		n, err := io.Copy(mw, src)
+		src.Close()
+		if err != nil {
+			return "", 0, fmt.Errorf("storage: concat %q: %w", key, err)
+		}
+		total += n
+	}
+
+	if err := tempFile.Sync(); err != nil {
+		return "", 0, fmt.Errorf("storage: sync temp file: %w", err)
+	}
+	if err := tempFile.Close(); err != nil {
+		return "", 0, fmt.Errorf("storage: close temp file: %w", err)
+	}
+	if err := os.Rename(tempFile.Name(), destPath); err != nil {
+		return "", 0, fmt.Errorf("storage: rename temp file: %w", err)
+	}
+	success = true
+
+	return hex.EncodeToString(hasher.Sum(nil)), total, nil
+}
+
 // 编译期断言：Local 必须满足 Storage 接口（漏实现方法在这一行就会报错）。
 var _ Storage = (*Local)(nil)
 
@@ -184,10 +249,10 @@ var _ Storage = (*Local)(nil)
 //
 // 全绿之后，再跑一次真正的端到端：
 //
-//	go run ./cmd/server      # 另开一个终端
+//	go run ./cmd/server
 //	curl -s -X POST localhost:8081/api/v1/auth/register -H 'Content-Type: application/json' \
-//	     -d '{"username":"alice","password":"password123"}'
+//	-d '{"username":"alice","password":"password123"}'
 //	TOKEN=$(curl -s -X POST localhost:8081/api/v1/auth/login -H 'Content-Type: application/json' \
-//	     -d '{"username":"alice","password":"password123"}' | jq -r .token)
+//	    -d '{"username":"alice","password":"password123"}' | jq -r .token)
 //	head -c 5000000 /dev/urandom > /tmp/big.bin
-//	curl -s -X POST localhost:8081/api/v1/files -H "Authorization: Bearer $TOKEN" -F file=@/tmp/big.bin
+//  curl -s -X POST localhost:8081/api/v1/files -H "Authorization: Bearer $TOKEN" -F file=@/tmp/big.bin//
