@@ -11,21 +11,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// ---------------------------------------------------------------------------
-// D3 的契约：引用计数（内容回收）
-//
-// 实现 blobs.go 的 ReclaimOrphanBlobs 之前，下面这一组是红的。
-// 和 nodes_test.go 一样打**真数据库**（库不可达时 Skip，SKIP ≠ 过）。
-// 跑之前先确认 0002 号迁移已应用（nodes.blob_id 的外键是 ON DELETE SET NULL），
-// 否则删 blob 行会被外键挡下：
-//
-//	docker exec -i netdisk-postgres psql -v ON_ERROR_STOP=1 -U netdisk -d netdisk \
-//	    < migrations/0002_blob_pointer_on_delete_set_null.sql
-// ---------------------------------------------------------------------------
+// 内容回收的用例打真数据库（先跑 `make up`），库不可达时跳过。
 
-// newTestBlob 造一份内容（blobs 行）。内容没有 owner，所以用例结束要自己清理。
-// 注意清理顺序：t.Cleanup 后进先出，blob 的清理比用户的先跑 —— 此时节点还在，
-// 靠的正是 ON DELETE SET NULL 才能删掉 blob 行。
+// newTestBlob 造一份 blobs 行；blob 无 owner，需在用例结束时自行清理。
+// 清理先于用户执行（t.Cleanup 后进先出），此时节点还在，靠 ON DELETE SET NULL 删行。
 func newTestBlob(t *testing.T, st *Store, ctx context.Context) model.Blob {
 	t.Helper()
 	sum := sha256.Sum256([]byte(uuid.NewString()))
@@ -49,7 +38,7 @@ func newTestFile(t *testing.T, st *Store, ctx context.Context, owner uuid.UUID, 
 	return n.ID
 }
 
-// 子树里唯一引用某内容的文件被删 → 该 blob 行消失、key 出现在返回值里。
+// 子树里唯一引用某内容的文件被删时，该 blob 行消失且 key 出现在返回值里。
 func TestReclaimOrphanBlobsDeletesUnreferencedContent(t *testing.T) {
 	st, ctx := newTestStore(t)
 	owner := newTestUser(t, st, ctx)
@@ -77,7 +66,7 @@ func TestReclaimOrphanBlobsDeletesUnreferencedContent(t *testing.T) {
 	}
 }
 
-// 同一个 blob 在子树里被多个文件引用 → key 只出现一次。
+// 同一 blob 在子树里被多个文件引用时 key 只出现一次。
 func TestReclaimOrphanBlobsDedupesWithinSubtree(t *testing.T) {
 	st, ctx := newTestStore(t)
 	owner := newTestUser(t, st, ctx)
@@ -103,7 +92,7 @@ func TestReclaimOrphanBlobsDedupesWithinSubtree(t *testing.T) {
 	}
 }
 
-// 子树外还有存活节点引用同一 blob → 一行都不删。
+// 子树外仍有存活节点引用同一 blob 时一行都不删。
 func TestReclaimOrphanBlobsKeepsLiveReference(t *testing.T) {
 	st, ctx := newTestStore(t)
 	owner := newTestUser(t, st, ctx)
@@ -114,7 +103,7 @@ func TestReclaimOrphanBlobsKeepsLiveReference(t *testing.T) {
 	}
 	blob := newTestBlob(t, st, ctx)
 	newTestFile(t, st, ctx, owner, &dir.ID, "a.bin", blob.ID)
-	newTestFile(t, st, ctx, owner, nil, "keep.bin", blob.ID) // 根目录上的第二个引用，留着
+	newTestFile(t, st, ctx, owner, nil, "keep.bin", blob.ID) // 根目录上的第二个引用，保留
 
 	if err := st.SoftDeleteSubtree(ctx, owner, dir.ID); err != nil {
 		t.Fatalf("SoftDeleteSubtree: %v", err)
@@ -132,7 +121,7 @@ func TestReclaimOrphanBlobsKeepsLiveReference(t *testing.T) {
 	}
 }
 
-// 空目录 → 空切片 + nil（删空目录不是错误）。
+// 空目录返回空切片 + nil。
 func TestReclaimOrphanBlobsEmptyDir(t *testing.T) {
 	st, ctx := newTestStore(t)
 	owner := newTestUser(t, st, ctx)
@@ -154,7 +143,7 @@ func TestReclaimOrphanBlobsEmptyDir(t *testing.T) {
 	}
 }
 
-// 别的 owner 的存活节点引用同一 blob → 同样不删（存活判定不带 owner_id）。
+// 别的 owner 的存活节点引用同一 blob 时同样不删。
 func TestReclaimOrphanBlobsKeepsOtherOwnerReference(t *testing.T) {
 	st, ctx := newTestStore(t)
 	owner := newTestUser(t, st, ctx)

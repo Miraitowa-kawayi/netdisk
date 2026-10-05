@@ -8,16 +8,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// ---------------------------------------------------------------------------
-// 分享链接的持久化契约。打真库（先 `make up`），库不可达时 Skip —— SKIP ≠ 过。
-//
-// 最要紧的一条是 NodeIsLive：它决定"分享链接什么时候算死了"。
-// shares.node_id 的 ON DELETE CASCADE 对弱删无效，所以这条查询是唯一的防线。
-// ---------------------------------------------------------------------------
+// 分享链接的持久化用例打真数据库（先跑 `make up`），库不可达时跳过。
 
 func TestNodeIsLive(t *testing.T) {
 	st, ctx := newTestStore(t)
-	fx := newFixture(t, st, ctx) // root/A/B/C, root/D, root/E；B 在 A 下、C 在 B 下
+	fx := newFixture(t, st, ctx) // root/A/B/C、root/D、root/E
 
 	t.Run("活的节点", func(t *testing.T) {
 		for name, id := range map[string]uuid.UUID{"A": fx.a, "B": fx.b, "C": fx.c, "E": fx.e} {
@@ -41,7 +36,7 @@ func TestNodeIsLive(t *testing.T) {
 		}
 	})
 
-	t.Run("祖先被删 → 子孙也不活（这条是重点）", func(t *testing.T) {
+	t.Run("祖先被删时子孙也不活", func(t *testing.T) {
 		if err := st.SoftDeleteSubtree(ctx, fx.owner, fx.a); err != nil {
 			t.Fatalf("软删 A: %v", err)
 		}
@@ -54,7 +49,7 @@ func TestNodeIsLive(t *testing.T) {
 				t.Errorf("%s 在 A 被删后不该还活着", name)
 			}
 		}
-		// 反向对照：没被动过的兄弟节点 E 必须仍然是活的，别把整棵树都判死。
+		// 对照：未受影响的兄弟节点 E 仍应为活。
 		if live, err := st.NodeIsLive(ctx, fx.owner, fx.e); err != nil || !live {
 			t.Errorf("E 不该受 A 的影响: live=%v err=%v", live, err)
 		}
@@ -127,7 +122,7 @@ func TestShareDeleteIsOwnerScoped(t *testing.T) {
 		t.Fatalf("CreateShare: %v", err)
 	}
 
-	// 别人撤销：必须 ErrNotFound，而且那行要还在。
+	// 别人撤销返回 ErrNotFound，且该行仍在。
 	if err := st.DeleteShare(ctx, other, share.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("撤销别人的分享应 ErrNotFound，实得 %v", err)
 	}
@@ -135,7 +130,7 @@ func TestShareDeleteIsOwnerScoped(t *testing.T) {
 		t.Fatalf("别人的撤销不该动到这条分享: %v", err)
 	}
 
-	// 自己撤销：成功，且 token 立刻失效。
+	// 自己撤销成功，token 立刻失效。
 	if err := st.DeleteShare(ctx, fx.owner, share.ID); err != nil {
 		t.Fatalf("自己撤销: %v", err)
 	}

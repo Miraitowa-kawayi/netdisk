@@ -13,11 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Uploads 是分片上传（断点续传）的业务层。
-//
-// 会话就是一个状态机：pending（可传分片）→ completed（收尾成功、建了节点）
-// 或 aborted（用户放弃）。分片按 part_no 存进 upload_parts，主键 (session_id, part_no)
-// 让"重复传同一片"成为幂等操作 —— 这正是断点续传能工作的原因。
+// Uploads 是分片上传（断点续传）的业务层，会话状态为 pending/completed/aborted。
 type Uploads struct {
 	store   *repository.Store
 	storage storage.Storage
@@ -29,13 +25,12 @@ func NewUploads(store *repository.Store, st storage.Storage, backend string, log
 	return &Uploads{store: store, storage: st, backend: backend, logger: logger}
 }
 
-// partKey 是分片对象在存储里的位置。和内容对象（blobs/…）分开前缀，一眼分得清。
+// partKey 返回分片对象在存储中的 key。
 func partKey(sessionID uuid.UUID, partNo int) string {
 	return fmt.Sprintf("uploads/%s/%d", sessionID, partNo)
 }
 
-// checkParentDir 确认父目录存在、属于自己、且真的是个目录。nil = 根目录，永远存在。
-// Files 与 Uploads 共用。
+// checkParentDir 确认父目录存在、属于自己且是目录；parentID 为 nil 表示根目录。
 func checkParentDir(ctx context.Context, store *repository.Store, ownerID uuid.UUID, parentID *uuid.UUID) error {
 	if parentID == nil {
 		return nil
@@ -68,11 +63,10 @@ type CreateInput struct {
 	Name        string
 	TotalSize   int64
 	ChunkSize   int64
-	ContentHash *string // 客户端预申报的整份 SHA-256（可选，P7 暂不据此秒传）
+	ContentHash *string // 客户端预申报的整份 SHA-256（可选）
 }
 
-// Create 开一个分片会话。part_count 由 total_size/chunk_size 向上取整算出（至少 1）。
-// 分片大小由**服务端**定（客户端给 chunk_size），这样每一片该多大是确定的，收尾才不会错位。
+// Create 开一个分片会话，part_count 由 total_size/chunk_size 向上取整（至少 1）。
 func (u *Uploads) Create(ctx context.Context, in CreateInput) (model.UploadSession, error) {
 	name, err := cleanName(in.Name)
 	if err != nil {
@@ -103,8 +97,7 @@ type UploadStatus struct {
 	MissingParts  []int
 }
 
-// Status 查会话进度。客户端（进程重启 / 上传中断后）拿 session id 回来问
-// "我传了哪些、还缺哪些"，只补缺的那些 —— 这就是"断点"续上传。
+// Status 查会话进度，返回已收到的分片号和仍缺的分片号。
 func (u *Uploads) Status(ctx context.Context, ownerID, sessionID uuid.UUID) (UploadStatus, error) {
 	sess, err := u.store.GetUploadSession(ctx, ownerID, sessionID)
 	if err != nil {
@@ -135,8 +128,7 @@ func (u *Uploads) List(ctx context.Context, ownerID uuid.UUID) ([]model.UploadSe
 	return u.store.ListPendingUploadSessions(ctx, ownerID)
 }
 
-// expectedPartSize 算第 partNo 片应有的字节数：除最后一片外都等于 chunk_size，
-// 最后一片是总大小减掉前面所有片。于是"所有片大小之和 == total_size"是可证的。
+// expectedPartSize 返回第 partNo 片应有的字节数；最后一片为 total_size 减去前面各片之和。
 func expectedPartSize(sess model.UploadSession, partNo int) int64 {
 	if partNo == sess.PartCount-1 {
 		return sess.TotalSize - int64(sess.PartCount-1)*sess.ChunkSize
@@ -144,10 +136,8 @@ func expectedPartSize(sess model.UploadSession, partNo int) int64 {
 	return sess.ChunkSize
 }
 
-// PutPart 收一个分片：把 body **流式**写进存储，再登记行（重复传同一片就覆盖）。
-//
-// 大小严格校验：第 n 片必须正好是它该有的字节数，多一个少一个都拒。否则收尾拼出来的内容
-// 会静默错位 —— 比"传失败了"难查得多。校验不过时把刚写下的对象删掉，不留垃圾。
+// PutPart 收一个分片：流式写入存储并登记行（重复上传同一片为幂等覆盖）。
+// 分片大小必须严格等于应有字节数，不符则删掉刚写入的对象并返回错误。
 func (u *Uploads) PutPart(ctx context.Context, ownerID, sessionID uuid.UUID, partNo int, body io.Reader) (model.UploadPart, error) {
 	sess, err := u.store.GetUploadSession(ctx, ownerID, sessionID)
 	if err != nil {
@@ -162,8 +152,7 @@ func (u *Uploads) PutPart(ctx context.Context, ownerID, sessionID uuid.UUID, par
 
 	want := expectedPartSize(sess, partNo)
 	key := partKey(sessionID, partNo)
-	// 多读一个字节用来判"超长"：这样就算客户端灌一个超大 body，临时文件最多长到 want+1，
-	// 不会被拖垮；真正的"正好 want 字节"由下面的 Stat 校验。
+	// 多读 1 字节用于判断超长，实际大小由随后的 Stat 校验。
 	checksum, err := u.storage.Put(ctx, key, io.LimitReader(body, want+1), want)
 	if err != nil {
 		return model.UploadPart{}, fmt.Errorf("write part: %w", err)
@@ -184,8 +173,8 @@ func (u *Uploads) PutPart(ctx context.Context, ownerID, sessionID uuid.UUID, par
 	return model.UploadPart{SessionID: sessionID, PartNo: partNo, Size: info.Size, Checksum: checksum}, nil
 }
 
-// Abort 放弃一个会话：标记 aborted 并清掉已收到的分片对象。已经不在 pending 的会话
-// 再放弃也返回 nil（幂等）—— 用户点"取消"不该因为顺序而报错。
+// Abort 放弃一个会话：标记 aborted 并删掉已收到的分片对象；
+// 已不在 pending 的会话重复放弃也返回 nil。
 func (u *Uploads) Abort(ctx context.Context, ownerID, sessionID uuid.UUID) error {
 	sess, err := u.store.GetUploadSession(ctx, ownerID, sessionID)
 	if err != nil {
@@ -208,22 +197,9 @@ func (u *Uploads) Abort(ctx context.Context, ownerID, sessionID uuid.UUID) error
 	return nil
 }
 
-// Complete 收尾一个分片会话：确认分片齐了 → **按 part_no 顺序**拼成一份内容 →
-// 登记 blob + 建节点 → 标记会话 completed → 清掉临时分片对象。返回建好的文件节点。
-//
-// 必须满足（internal/service/uploads_test.go 会逐条验）：
-//  1. 会话不存在 / 不是自己的 → ErrNotFound；不是 pending（已完成或已放弃）→ ErrUploadNotPending；
-//  2. 还缺分片 → ErrUploadIncomplete，且**什么都没变**（不建节点、不删分片、会话仍 pending）；
-//  3. 分片齐全 → 按 part_no 升序拼接；建出的节点 size == total_size，
-//     且内容的 SHA-256 == 把各分片按 part_no 顺序接起来的 SHA-256；
-//  4. 收尾成功后：会话 status == completed、该会话的临时分片对象都被删掉；
-//  5. 目标目录下已有同名 → ErrNameConflict（和普通上传同样的语义）；
-//  6. 内容若已在库里（别人传过同一份）→ 复用那份 blob、删掉刚拼出来的副本（和 Files.Upload 一样）。
-//
-// 提示：拼接到新对象用 u.storage.Concat(ctx, dstKey, srcKeys)（srcKeys 按 part_no 升序），
-// dstKey 用 "blobs/" + uuid.NewString()；登记与建节点照 Files.Upload 的三步走
-// （UpsertBlob → 没新增就删掉自己刚写的副本 → CreateNode），最后用
-// u.store.TransitionUploadSession 把会话推到 completed，并逐个删掉分片对象。
+// Complete 收尾一个分片会话：按 part_no 顺序拼接分片、登记 blob、建节点，
+// 并把会话标记为 completed、删掉临时分片对象。
+// 缺分片时返回 ErrUploadIncomplete 且不改动任何状态。
 func (u *Uploads) Complete(ctx context.Context, ownerID, sessionID uuid.UUID) (model.Node, error) {
 	session, err := u.store.GetUploadSession(ctx, ownerID, sessionID)
 	if err != nil {
@@ -251,7 +227,7 @@ func (u *Uploads) Complete(ctx context.Context, ownerID, sessionID uuid.UUID) (m
 	}
 	blob, recorded, err := u.store.UpsertBlob(ctx, hash, size, u.backend, destKey)
 	if err != nil {
-		_ = u.storage.Delete(ctx, destKey) // 记不上账就别把刚拼好的对象留在盘上
+		_ = u.storage.Delete(ctx, destKey) // 登记失败则删掉刚拼好的对象
 		return model.Node{}, fmt.Errorf("upsert blob: %w", err)
 	}
 
@@ -297,8 +273,7 @@ func (u *Uploads) Complete(ctx context.Context, ownerID, sessionID uuid.UUID) (m
 	if !ok {
 		return model.Node{}, ErrUploadNotPending
 	}
-	// 清理分片是收尾的收尾：此刻节点已建、会话已 completed，删不掉只是留垃圾，
-	// 不该把一次已经成功的收尾翻成 500。
+	// 节点已建、会话已 completed，删分片失败只留下垃圾，不影响本次收尾结果。
 	for _, part := range parts {
 		key := partKey(sessionID, part.PartNo)
 		if err := u.storage.Delete(ctx, key); err != nil && !errors.Is(err, storage.ErrNotFound) {

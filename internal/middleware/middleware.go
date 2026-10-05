@@ -10,8 +10,7 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 )
 
-// RequestLogger 记录每个请求的方法、路径、状态码、字节数与耗时。
-// 依赖 chimw.RequestID 已经放进 context。
+// RequestLogger 记录每个请求的方法、路径、状态码、字节数与耗时，需先挂 chimw.RequestID。
 func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +40,7 @@ func Recoverer(logger *slog.Logger) func(http.Handler) http.Handler {
 				if rec == nil {
 					return
 				}
-				// 标准库约定：ErrAbortHandler 表示"主动中止连接"，必须原样抛出。
+				// ErrAbortHandler 表示主动中止连接，必须原样抛出。
 				if rec == http.ErrAbortHandler {
 					panic(rec)
 				}

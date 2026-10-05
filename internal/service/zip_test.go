@@ -21,14 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ---------------------------------------------------------------------------
-// P8 文件夹打包下载的业务契约。打真库（先 `make up`），库不可达时 Skip —— SKIP ≠ 过。
-//
-// 交付时这一组应该是**红的**：OpenZip 的遍历（Files.writeZip）还没实现，
-// 红要红在"zip 里没东西 / 流报错"，而不是编译不过。
-//
-//	go test ./internal/service/ -run Zip -v
-// ---------------------------------------------------------------------------
+// zip 打包下载的测试打真库（先跑 `make up`），库不可达时跳过。
 
 type zipFixture struct {
 	files   *Files
@@ -52,7 +45,7 @@ func newZipFixture(t *testing.T) *zipFixture {
 	}
 	if err := st.Ping(ctx); err != nil {
 		st.Close()
-		t.Skipf("跳过：数据库不可达（%v）—— 先跑 `make up`", err)
+		t.Skipf("跳过：数据库不可达（%v）；先跑 `make up`", err)
 	}
 	t.Cleanup(st.Close)
 
@@ -117,8 +110,7 @@ func (f *zipFixture) mkdir(t *testing.T, parent *uuid.UUID, name string) model.N
 	return dir
 }
 
-// openZip 调 OpenZip 并把整条 zip 流读回来解成 名字→内容 的表。
-// 目录条目以 '/' 结尾，其内容为空串。
+// openZip 调 OpenZip 并把 zip 流解成文件名到内容的映射（目录条目内容为空串）。
 func (f *zipFixture) openZip(t *testing.T, id uuid.UUID) (string, map[string]string) {
 	t.Helper()
 	z, err := f.files.OpenZip(f.ctx, f.owner, id)
@@ -186,7 +178,7 @@ func TestZipFolderTree(t *testing.T) {
 		}
 	}
 
-	// 目录条目：sub 与 empty（空的也得有）都要在，且名字以 '/' 结尾。
+	// 目录条目：sub 与 empty 都要在，且名字以 '/' 结尾。
 	for _, dir := range []string{"docs/sub/", "docs/empty/"} {
 		body, ok := entries[dir]
 		if !ok {
@@ -198,7 +190,7 @@ func TestZipFolderTree(t *testing.T) {
 		}
 	}
 
-	// 顶层前缀必须是 root.Name + "/"，且整棵树不许出现前导 '/' 的条目名。
+	// 条目名必须以 docs/ 开头，且不带前导 '/'。
 	for entry := range entries {
 		if strings.HasPrefix(entry, "/") {
 			t.Errorf("条目名不能以 '/' 开头（Windows 资源管理器会打不开）：%q", entry)

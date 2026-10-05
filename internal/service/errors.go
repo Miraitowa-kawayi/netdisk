@@ -5,31 +5,30 @@ import (
 	"fmt"
 )
 
-// 业务错误。这一层刻意不 import net/http —— 翻译成状态码是 handler 的事。
 var (
-	// ErrNotFound 覆盖"不存在"和"不属于你"两种情况（对外不区分）。
+	// ErrNotFound 同时表示"不存在"和"不属于调用者"。
 	ErrNotFound = errors.New("not found")
-	// ErrUsernameTaken 注册时用户名被占用。
+	// ErrUsernameTaken 注册时用户名已被占用。
 	ErrUsernameTaken = errors.New("username already taken")
-	// ErrInvalidCredentials 用户不存在与密码错误共用这一个，不给爆破者额外信息。
+	// ErrInvalidCredentials 表示用户不存在或密码错误。
 	ErrInvalidCredentials = errors.New("invalid username or password")
-	// ErrNameConflict 同一目录下已有同名文件/文件夹。
+	// ErrNameConflict 同一目录下已有同名文件或文件夹。
 	ErrNameConflict = errors.New("another entry with the same name already exists here")
 	// ErrNotAFile 下载目标是个文件夹。
 	ErrNotAFile = errors.New("target is a folder, not a file")
-	// ErrNotADirectory 打包下载的目标是个文件 —— zip 只能打包文件夹。
+	// ErrNotADirectory 打包下载的目标是文件而不是文件夹。
 	ErrNotADirectory = errors.New("target is a file, not a folder")
-	// ErrCycle 移动会让文件树成环：把文件夹移进它自己或它自己的子孙里。
+	// ErrCycle 移动会让文件夹进入自身或其后代。
 	ErrCycle = errors.New("cannot move a folder into itself or its own subdirectory")
-	// ErrContentNotStored 秒传时服务端没有这个 hash 的内容 —— 客户端得老实传一遍。
+	// ErrContentNotStored 秒传时服务端没有该 hash 的内容。
 	ErrContentNotStored = errors.New("no content with that hash is stored here")
-	// ErrUploadNotPending 分片会话不在 pending 状态（已完成或已放弃）—— 不能再传分片/收尾。
+	// ErrUploadNotPending 分片会话已不在 pending 状态。
 	ErrUploadNotPending = errors.New("upload session is no longer pending")
-	// ErrUploadIncomplete 收尾时会话还缺分片 —— 客户端要先把缺的补上再收尾。
+	// ErrUploadIncomplete 收尾时会话仍缺分片。
 	ErrUploadIncomplete = errors.New("upload session is missing one or more parts")
 )
 
-// ValidationError 携带一句可以直接给用户看的说明（参数不合法，不是内部故障）。
+// ValidationError 是参数校验错误，Msg 可直接展示给用户。
 type ValidationError struct{ Msg string }
 
 func (e *ValidationError) Error() string { return e.Msg }

@@ -1,7 +1,4 @@
-// Package model 是数据库表在 Go 侧的映射，字段与 migrations/0001_init.sql 一一对应。
-//
-// 这里刻意不引入 ORM 的模型标签：数据访问用 pgx 手写 SQL，
-// 表结构的事实来源是 migrations 里的 DDL，不是结构体标签。
+// Package model 是数据库表的 Go 映射，字段与 migrations/0001_init.sql 对应。
 package model
 
 import (
@@ -10,7 +7,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// User 对应 users 表。密码哈希永不序列化到 JSON。
+// User 对应 users 表；PasswordHash 不序列化。
 type User struct {
 	ID           uuid.UUID `json:"id"`
 	Username     string    `json:"username"`
@@ -21,7 +18,7 @@ type User struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
-// Blob 是磁盘上真实存在的一份内容，多个 Node 可以指向同一个 Blob（秒传）。
+// Blob 是一份存储内容，多个 Node 可指向同一个 Blob。
 type Blob struct {
 	ID          uuid.UUID `json:"id"`
 	ContentHash string    `json:"content_hash"`
@@ -31,7 +28,7 @@ type Blob struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-// Node 是文件或文件夹。二者同表：is_dir 区分，parent_id 自引用成树。
+// Node 是文件或文件夹，由 is_dir 区分，parent_id 自引用成树。
 type Node struct {
 	ID        uuid.UUID  `json:"id"`
 	OwnerID   uuid.UUID  `json:"owner_id"`
@@ -44,7 +41,7 @@ type Node struct {
 	UpdatedAt time.Time  `json:"updated_at"`
 }
 
-// Share 是一条分享链接。token 是公开访问凭据。
+// Share 是一条分享链接，token 为公开访问凭据。
 type Share struct {
 	ID         uuid.UUID  `json:"id"`
 	Token      string     `json:"token"`
@@ -55,7 +52,7 @@ type Share struct {
 	CreatedAt  time.Time  `json:"created_at"`
 }
 
-// UploadSession 是一次分片上传的意图，P7 断点续传的状态主体。
+// UploadSession 是一次分片上传会话。
 type UploadSession struct {
 	ID          uuid.UUID  `json:"id"`
 	OwnerID     uuid.UUID  `json:"owner_id"`
@@ -70,7 +67,7 @@ type UploadSession struct {
 	ExpiresAt   time.Time  `json:"expires_at"`
 }
 
-// UploadPart 是会话里已收到的一个分片。主键 (SessionID, PartNo) 保证重传幂等。
+// UploadPart 是已收到的一个分片，主键 (SessionID, PartNo) 保证重传幂等。
 type UploadPart struct {
 	SessionID uuid.UUID `json:"session_id"`
 	PartNo    int       `json:"part_no"`

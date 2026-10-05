@@ -13,9 +13,7 @@ import (
 	"strings"
 )
 
-// Local 把对象存在本地文件系统上，磁盘布局就是 <dir>/<key>。
-//
-// 由 service 层决定 key（本项目是 "blobs/<uuid>"）；这一层不关心业务，只管字节。
+// Local 把对象存在本地文件系统上，布局为 <dir>/<key>。
 type Local struct {
 	dir string
 }
@@ -30,9 +28,7 @@ func NewLocal(dir string) (*Local, error) {
 	return &Local{dir: dir}, nil
 }
 
-// keyPath 把 key 映射成磁盘路径。
-// 注意 path.Clean("/"+key) 的那一撇：它把 "../../etc/passwd" 这种 key 归一化成
-// 根目录内部的路径，所以 key 没法逃出 l.dir。
+// keyPath 把 key 映射成磁盘路径；path.Clean("/"+key) 使 key 无法逃出 l.dir。
 func (l *Local) keyPath(key string) (string, error) {
 	if key == "" {
 		return "", errors.New("storage: empty key")
@@ -46,21 +42,7 @@ func (l *Local) keyPath(key string) (string, error) {
 	return p, nil
 }
 
-// ===========================================================================
-//  以下两个是 D1 的流式核心 —— 留给你写。契约在注释里，验证命令见文件末尾。
-// ===========================================================================
-
 // Put 流式写入对象，返回内容的 SHA-256（十六进制小写）。
-//
-// 必须满足（local_test.go 会逐条验）：
-//  1. 边读 r 边写盘 —— 不许 io.ReadAll，内存不能随对象大小涨；
-//  2. r 只读一遍：hash 用 io.TeeReader / io.MultiWriter 在写的路上顺便算；
-//  3. 写成功之前，最终路径上不能出现文件 —— 先写临时文件，成了再 rename 过去；
-//  4. 中途出错要把临时文件清掉，最终路径上不留半成品；
-//  5. 返回 hex.EncodeToString(hasher.Sum(nil))。
-//
-// 提示：os.CreateTemp(目标目录, ".put-*") 建临时文件能保证同一文件系统，
-// rename 才是原子的。
 func (l *Local) Put(ctx context.Context, key string, r io.Reader, size int64) (string, error) {
 	// 获取安全的绝对路径
 	destPath, err := l.keyPath(key)
@@ -116,8 +98,7 @@ func (l *Local) Put(ctx context.Context, key string, r io.Reader, size int64) (s
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-// Open 打开对象供读取。返回的 reader 必须能 Seek ——
-// http.ServeContent 靠它支持 Range/206（D4 断点续传的下载半边）。
+// Open 打开对象供读取，返回的 reader 必须可 Seek（http.ServeContent 依赖它支持 Range）。
 // 对象不存在时返回 ErrNotFound。
 func (l *Local) Open(ctx context.Context, key string) (io.ReadSeekCloser, ObjectInfo, error) {
 	destPath, err := l.keyPath(key)
@@ -175,14 +156,8 @@ func (l *Local) Stat(ctx context.Context, key string) (ObjectInfo, error) {
 	return ObjectInfo{Key: key, Size: fi.Size()}, nil
 }
 
-// Concat 把 srcKeys 里的对象按给定顺序拼成一个新对象 dstKey，边拼边算 SHA-256。
-//
-// 和 Put 是同一个套路（临时文件 → Sync → Close → Rename），区别是"源"从**一个 Reader**
-// 变成**一串已存在的对象**：逐个 Open、读出、写进同一个 MultiWriter。一次只开一个源文件，
-// 所以内存和文件描述符都不随分片数涨。任一源对象不存在 → ErrNotFound，
-// 中途失败时最终路径上不留半成品（临时文件建在目标目录，defer 清掉）。
-//
-// 这是 D4 分片上传收尾要用的原语：把 uploads/<session>/<n> 按 n 的顺序接起来。
+// Concat 按 srcKeys 的顺序把对象拼成新对象 dstKey，边拼边算 SHA-256，返回 (hash, 总字节数)。
+// 一次只开一个源对象，内存不随分片数涨；任一源对象不存在时返回 ErrNotFound，失败不留半成品。
 func (l *Local) Concat(ctx context.Context, dstKey string, srcKeys []string) (string, int64, error) {
 	destPath, err := l.keyPath(dstKey)
 	if err != nil {
@@ -216,7 +191,7 @@ func (l *Local) Concat(ctx context.Context, dstKey string, srcKeys []string) (st
 		}
 		src, _, err := l.Open(ctx, key)
 		if err != nil {
-			return "", 0, err // 源不存在 → 直接是 ErrNotFound，不留半成品
+			return "", 0, err // 源不存在时直接返回 ErrNotFound，不留半成品
 		}
 		n, err := io.Copy(mw, src)
 		src.Close()
@@ -240,19 +215,5 @@ func (l *Local) Concat(ctx context.Context, dstKey string, srcKeys []string) (st
 	return hex.EncodeToString(hasher.Sum(nil)), total, nil
 }
 
-// 编译期断言：Local 必须满足 Storage 接口（漏实现方法在这一行就会报错）。
+// 编译期断言 Local 实现 Storage。
 var _ Storage = (*Local)(nil)
-
-// 验证命令（在 netdisk/ 目录下跑）：
-//
-//	go test ./internal/storage/ -v
-//
-// 全绿之后，再跑一次真正的端到端：
-//
-//	go run ./cmd/server
-//	curl -s -X POST localhost:8081/api/v1/auth/register -H 'Content-Type: application/json' \
-//	-d '{"username":"alice","password":"password123"}'
-//	TOKEN=$(curl -s -X POST localhost:8081/api/v1/auth/login -H 'Content-Type: application/json' \
-//	    -d '{"username":"alice","password":"password123"}' | jq -r .token)
-//	head -c 5000000 /dev/urandom > /tmp/big.bin
-//  curl -s -X POST localhost:8081/api/v1/files -H "Authorization: Bearer $TOKEN" -F file=@/tmp/big.bin//

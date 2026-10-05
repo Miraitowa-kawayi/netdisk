@@ -10,8 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// TokenParser 由 service.Tokens 满足。middleware 只依赖这个窄接口，
-// 于是它不必 import 业务包（也避免以后绕出循环依赖）。
+// TokenParser 由 service.Tokens 实现，使 middleware 不必 import 业务包。
 type TokenParser interface {
 	Parse(raw string) (uuid.UUID, error)
 }
@@ -20,8 +19,8 @@ type ctxKey int
 
 const userIDKey ctxKey = iota
 
-// RequireAuth 校验 Authorization: Bearer <token>，通过后把用户 id 放进 context。
-// 失败一律 401，且不区分"没带 token / 签名不对 / 过期"—— 不给爆破者提示。
+// RequireAuth 校验 Authorization: Bearer <token>，通过后把用户 id 放进 context；
+// 失败一律 401，不区分缺少、签名错误或过期。
 func RequireAuth(logger *slog.Logger, tp TokenParser) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

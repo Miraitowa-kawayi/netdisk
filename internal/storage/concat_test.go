@@ -8,8 +8,7 @@ import (
 	"testing"
 )
 
-// Concat 是 D4 分片上传收尾用的原语（我搭的部分）。这几条验它的合同：
-// 按给定顺序拼、边拼边算 hash、源缺失不留半成品、空列表可用。
+// Concat 的用例：按给定顺序拼、边拼边算 hash、源缺失不留半成品、空列表可用。
 
 func putRaw(t *testing.T, l *Local, key string, b []byte) {
 	t.Helper()
@@ -58,7 +57,7 @@ func TestConcatJoinsSourcesInGivenOrder(t *testing.T) {
 	}
 }
 
-// 顺序是调用方给的，不是排序 —— 换个顺序结果就不同。
+// 顺序由调用方给定，不做排序。
 func TestConcatRespectsOrderNotContent(t *testing.T) {
 	l := newTestLocal(t)
 	ctx := context.Background()
@@ -75,7 +74,7 @@ func TestConcatRespectsOrderNotContent(t *testing.T) {
 	}
 }
 
-// 源缺失 → ErrNotFound，且最终路径上不留半成品（临时文件也不留）。
+// 源缺失返回 ErrNotFound，且不留半成品。
 func TestConcatMissingSourceLeavesNothing(t *testing.T) {
 	l := newTestLocal(t)
 	ctx := context.Background()
@@ -90,7 +89,7 @@ func TestConcatMissingSourceLeavesNothing(t *testing.T) {
 	if _, _, err := l.Open(ctx, "blobs/final"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("失败后不该留下目标对象，Open = %v", err)
 	}
-	// 盘上只该有那 1 个源对象（临时文件已清）。
+	// 盘上只应有那 1 个源对象，临时文件已清。
 	if n := countFiles(t, l.dir); n != 1 {
 		t.Errorf("盘上应只有 1 个源对象，实得 %d 个文件", n)
 	}

@@ -45,7 +45,7 @@ func newUploadFixture(t *testing.T) *uploadFixture {
 	}
 	if err := st.Ping(ctx); err != nil {
 		st.Close()
-		t.Skipf("跳过：数据库不可达（%v）—— 先跑 `make up`", err)
+		t.Skipf("跳过：数据库不可达（%v）；先跑 `make up`", err)
 	}
 	t.Cleanup(st.Close)
 
@@ -67,8 +67,7 @@ func newUploadFixture(t *testing.T) *uploadFixture {
 	return f
 }
 
-// newUser 建一个测试用户。users → upload_sessions / nodes 都是 ON DELETE CASCADE，
-// 删掉用户就把这个用例造出来的会话、分片、节点全带走。
+// newUser 建一个测试用户；删掉用户会级联删除其会话、分片与节点。
 func (f *uploadFixture) newUser(t *testing.T) uuid.UUID {
 	t.Helper()
 	u, err := f.store.CreateUser(f.ctx, "test-"+uuid.NewString(), "not-a-real-bcrypt-hash", "")
@@ -81,8 +80,7 @@ func (f *uploadFixture) newUser(t *testing.T) uuid.UUID {
 	return u.ID
 }
 
-// trackBlobHash 登记"用例结束后删掉这个 hash 的 blob 行"。blob 不属于任何用户，
-// 不会随用户级联删除，所以要自己收。
+// trackBlobHash 登记用例结束后删除该 hash 的 blob 行（blob 不随用户级联删除）。
 func (f *uploadFixture) trackBlobHash(t *testing.T, hash string) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -135,7 +133,7 @@ func (f *uploadFixture) countBlobsByHash(t *testing.T, hash string) int {
 	return n
 }
 
-// storageFiles 数存储目录下的对象（不含目录）。用来验"分片被清掉 / 拼接副本被删 / 只留最终对象"。
+// storageFiles 数存储目录下的对象（不含目录）。
 func (f *uploadFixture) storageFiles(t *testing.T) int {
 	t.Helper()
 	count := 0
@@ -200,7 +198,7 @@ func joinParts(parts [][]byte) []byte {
 	return bytes.Join(parts, nil)
 }
 
-// 缺片 → ErrUploadIncomplete，而且什么都没变（不建节点、不删分片、会话仍 pending）。
+// 缺片时返回 ErrUploadIncomplete，且不改变任何状态。
 func TestCompleteRejectsIncompleteSession(t *testing.T) {
 	f := newUploadFixture(t)
 	parts := buildParts(3000, 1000) // 3 片
@@ -222,14 +220,14 @@ func TestCompleteRejectsIncompleteSession(t *testing.T) {
 	}
 }
 
-// 分片齐全（且乱序到达）→ 按 part_no 顺序拼接，内容与按序拼接逐字节一致。
+// 分片乱序到达时按 part_no 顺序拼接。
 func TestCompleteAssemblesPartsInOrder(t *testing.T) {
 	f := newUploadFixture(t)
 	const total, chunk = int64(3000), int64(1000)
 	parts := buildParts(total, chunk)
 	sess := f.createSession(t, f.owner, "photo.bin", total, chunk)
 
-	// 故意乱序上传：2 → 0 → 1。收尾必须按 part_no 拼，不能按"到达顺序"。
+	// 故意乱序上传：收尾必须按 part_no 而非到达顺序拼接。
 	f.putPart(t, f.owner, sess.ID, 2, parts[2])
 	f.putPart(t, f.owner, sess.ID, 0, parts[0])
 	f.putPart(t, f.owner, sess.ID, 1, parts[1])
@@ -270,7 +268,7 @@ func TestCompleteAssemblesPartsInOrder(t *testing.T) {
 	}
 }
 
-// 别人的会话 → ErrNotFound。
+// 别人的会话返回 ErrNotFound。
 func TestCompleteOtherOwnerIsNotFound(t *testing.T) {
 	f := newUploadFixture(t)
 	other := f.newUser(t)
@@ -283,7 +281,7 @@ func TestCompleteOtherOwnerIsNotFound(t *testing.T) {
 	}
 }
 
-// 重复收尾 → 第二次 ErrUploadNotPending，且不会多建一个节点。
+// 重复收尾时第二次返回 ErrUploadNotPending，且不会多建节点。
 func TestCompleteIsNotRepeatable(t *testing.T) {
 	f := newUploadFixture(t)
 	parts := buildParts(1000, 1000)
@@ -302,7 +300,7 @@ func TestCompleteIsNotRepeatable(t *testing.T) {
 	}
 }
 
-// 目标目录下已有同名 → ErrNameConflict；会话不该被标记 completed，也不该留下拼接副本。
+// 目标目录下已有同名时返回 ErrNameConflict，会话保持 pending，也不留下拼接副本。
 func TestCompleteNameConflict(t *testing.T) {
 	f := newUploadFixture(t)
 	if _, err := f.store.CreateNode(f.ctx, f.owner, nil, "dup.bin", false, 1, nil); err != nil {
@@ -328,13 +326,13 @@ func TestCompleteNameConflict(t *testing.T) {
 	}
 }
 
-// 内容已在库里（别人传过同一份）→ 复用那份 blob、删掉刚拼出来的副本。
+// 内容已存在时复用该 blob，并删掉刚拼出来的副本。
 func TestCompleteReusesExistingContent(t *testing.T) {
 	f := newUploadFixture(t)
 	parts := buildParts(2000, 1000)
 	wantHash := hashParts(parts)
 
-	// 预置"这份内容早就在库里了"。
+	// 预置这份内容已在库中。
 	existingKey := "blobs/existing-" + uuid.NewString()
 	if _, recorded, err := f.store.UpsertBlob(f.ctx, wantHash, 2000, "local", existingKey); err != nil || !recorded {
 		t.Fatalf("预置 blob: recorded=%v err=%v", recorded, err)

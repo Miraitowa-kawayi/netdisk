@@ -8,25 +8,25 @@
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| P0 | 项目骨架、表结构、统一错误格式、健康检查 | ✅ |
-| P1 | 文件上传/下载/重命名/删除/列表（流式 IO） | ✅ |
-| P2 | 用户注册登录、JWT 鉴权 | ✅ |
-| P3 | 文件夹树：新建/更名/删除/移动 | ✅ |
-| P4 | 分享链接 | ✅ |
-| P5 | 多用户隔离 + 秒传去重 | ✅ |
-| P6 | 对象存储后端（S3 兼容） | ⬜ |
-| P7 | 断点续传：Range 下载 + 分片上传 | ✅ |
-| P8 | 文件夹打包下载 | ✅ |
-| P9 | NFS 映射 | ⬜ |
-| P10 | P2P 直传 | ⬜ |
+| 一 | 项目骨架、表结构、统一错误格式、健康检查 | ✅ |
+| 二 | 文件上传/下载/重命名/删除/列表（流式 IO） | ✅ |
+| 三 | 用户注册登录、JWT 鉴权 | ✅ |
+| 四 | 文件夹树：新建/更名/删除/移动 | ✅ |
+| 五 | 分享链接 | ✅ |
+| 六 | 多用户隔离 + 秒传去重 | ✅ |
+| 七 | 对象存储后端（S3 兼容） | ⬜ |
+| 八 | 断点续传：Range 下载 + 分片上传 | ✅ |
+| 九 | 文件夹打包下载 | ✅ |
+| 十 | NFS 映射 | ⬜ |
+| 十一 | P2P 直传 | ⬜ |
 
 ## 技术栈
 
-- **Go 1.27** / 标准库 `net/http`
-- **chi**：路由（贴近标准库，中间件生态小而成体系）
-- **pgx/v5**：直接手写 SQL，不引 ORM 
-- **PostgreSQL 16**：`docker compose` 起
-- **JWT**（`golang-jwt/jwt/v5`）：鉴权
+- Go 1.27 / 标准库 `net/http`
+- chi：路由（贴近标准库，中间件生态小而成体系）
+- pgx/v5：直接手写 SQL，不引 ORM
+- PostgreSQL 16：`docker compose` 起
+- JWT（`golang-jwt/jwt/v5`）：鉴权
 
 ## 快速开始
 
@@ -52,7 +52,7 @@ curl -i localhost:8081/readyz    # 200 {"status":"ready"}；数据库不可用�
 
 ### 重置数据库
 
-`migrations/` 里的脚本只在**数据卷为空时**执行一次。改了 DDL 要重来：
+`migrations/` 里的脚本只在数据卷为空时执行一次。改了 DDL 要重来：
 
 ```bash
 docker compose down -v && docker compose up -d postgres
@@ -76,16 +76,16 @@ docs/                设计说明与 API 文档
 ```
 
 分层的依赖方向是单向的：`handler → service → repository / storage`。
-上层只依赖下层的接口，所以 P6 加对象存储时不需要回头改 P1 的代码。
+上层只依赖下层的接口，所以以后加对象存储时不需要回头改文件接口的代码。
 
 ## 约定
 
-- **错误响应**统一为 `{"error":{"code":"...","message":"..."}}`，`code` 对外稳定
-- **健康检查**分两个：`/healthz` 只表示进程活着（探活用），`/readyz` 要求依赖可用（不要拿它做保活探针）
-- **提交信息**遵循 [Conventional Commits](https://www.conventionalcommits.org/)，小步提交
-- 不用 `io.ReadAll` 处理请求体或文件内容 —— 见 [docs/schema.md](./docs/schema.md) 同类说明
+- 错误响应统一为 `{"error":{"code":"...","message":"..."}}`，`code` 对外稳定
+- 健康检查分两个：`/healthz` 只表示进程活着（探活用），`/readyz` 要求依赖可用（不要拿它做保活探针）
+- 提交信息遵循 [Conventional Commits](https://www.conventionalcommits.org/)，小步提交
+- 不用 `io.ReadAll` 处理请求体或文件内容，见 [docs/schema.md](./docs/schema.md) 同类说明
 
 ## 后续计划
 
-- 用 `golang-migrate` 替换"初始脚本"式的建表方式（表结构开始频繁变动时）
-- 对象存储后端、NFS 映射、P2P 直传（P9/P10）
+- 用 `golang-migrate` 替换“初始脚本”式的建表方式（表结构开始频繁变动时）
+- 对象存储后端、NFS 映射、P2P 直传

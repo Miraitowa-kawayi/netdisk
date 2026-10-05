@@ -22,8 +22,7 @@ type Config struct {
 
 const dotEnvFile = ".env"
 
-// Load 先加载 .env（不存在则跳过），再读环境变量。
-// 已存在的环境变量优先，不会被 .env 覆盖 —— 这样部署时可以只靠环境变量。
+// Load 先加载 .env（不存在则跳过）再读环境变量；已存在的环境变量优先，不被 .env 覆盖。
 func Load() (*Config, error) {
 	if err := loadDotEnv(dotEnvFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("load %s: %w", dotEnvFile, err)
@@ -64,8 +63,8 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// loadDotEnv 是一个最小的 KEY=VALUE 解析器：忽略空行与 # 开头的注释，
-// 去掉值两端的引号，且不覆盖已存在的环境变量。
+// loadDotEnv 是最小的 KEY=VALUE 解析器：忽略空行与 # 注释，去掉值两端引号，
+// 且不覆盖已存在的环境变量。
 func loadDotEnv(path string) error {
 	f, err := os.Open(path)
 	if err != nil {

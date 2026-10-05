@@ -17,7 +17,7 @@ func scanShare(row pgx.Row) (model.Share, error) {
 	return s, translate(err)
 }
 
-// CreateShare 建一条分享。token 由 service 生成（随机串），expiresAt 为 nil 表示永不过期。
+// CreateShare 建一条分享；token 由 service 生成，expiresAt 为 nil 表示永不过期。
 func (s *Store) CreateShare(ctx context.Context, nodeID, createdBy uuid.UUID, token string, expiresAt *time.Time) (model.Share, error) {
 	row := s.pool.QueryRow(ctx, `
 INSERT INTO shares (token, node_id, created_by, expires_at)
@@ -26,14 +26,13 @@ RETURNING `+shareColumns, token, nodeID, createdBy, expiresAt)
 	return scanShare(row)
 }
 
-// GetShareByToken 按公开 token 取分享 —— 匿名访问的唯一入口，所以这里**没有** owner_id 条件：
-// 拿着 token 的人就是被授权的人。
+// GetShareByToken 按公开 token 取分享，不带 owner_id 条件（token 即授权凭据）。
 func (s *Store) GetShareByToken(ctx context.Context, token string) (model.Share, error) {
 	row := s.pool.QueryRow(ctx, `SELECT `+shareColumns+` FROM shares WHERE token = $1`, token)
 	return scanShare(row)
 }
 
-// ListSharesByOwner 列某人建过的分享，新的在前。
+// ListSharesByOwner 列某人创建的分享，新的在前。
 func (s *Store) ListSharesByOwner(ctx context.Context, ownerID uuid.UUID) ([]model.Share, error) {
 	rows, err := s.pool.Query(ctx, `
 SELECT `+shareColumns+`
@@ -56,8 +55,7 @@ SELECT `+shareColumns+`
 	return shares, translate(rows.Err())
 }
 
-// DeleteShare 撤销一条分享。owner_id 一起进 WHERE —— 撤销别人的分享表现为 ErrNotFound，
-// 和 GetNode 一样"不区分不存在与不属于你"。
+// DeleteShare 撤销一条分享；owner_id 一并进 WHERE，撤销别人的分享返回 ErrNotFound。
 func (s *Store) DeleteShare(ctx context.Context, ownerID, id uuid.UUID) error {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM shares WHERE id = $1 AND created_by = $2`, id, ownerID)
 	if err != nil {
@@ -69,21 +67,14 @@ func (s *Store) DeleteShare(ctx context.Context, ownerID, id uuid.UUID) error {
 	return nil
 }
 
-// IncrementShareVisit 给访问计数 +1。只做展示用 —— 调用方失败只 WARN，不该影响访问本身。
+// IncrementShareVisit 给访问计数 +1；调用方失败只记 WARN，不影响访问。
 func (s *Store) IncrementShareVisit(ctx context.Context, id uuid.UUID) error {
 	_, err := s.pool.Exec(ctx, `UPDATE shares SET visit_count = visit_count + 1 WHERE id = $1`, id)
 	return translate(err)
 }
 
-// NodeIsLive 判断节点存在、且**从它到根的整条祖先链上没有任何一环被弱删**。
-//
-// 为什么单独需要它：`shares.node_id` 是 ON DELETE CASCADE，但 nodes 是弱删的 ——
-// 那个 CASCADE 在"删掉一个目录"这条主路径上永远不会触发。于是"文件自己没被删、但它的
-// 父目录被删了"这种情况只能靠这条查询在访问时挡下来（docs/schema.md 第 6 节的约定）。
-//
-// 两个 EXISTS 合起来表达"链路存在" 且 "链路上没有一环 deleted_at 非空"。
-// ⚠️ 起点和递归都**不能**带 `deleted_at IS NULL` —— 正是要把被删的那一环查出来，
-// 带了就变成"永远为真"。
+// NodeIsLive 判断节点存在，且从它到根的整条祖先链上没有任何一环被软删。
+// 起点和递归都不能带 deleted_at IS NULL，因为正需要查出被删的那一环；带上会使结果恒为真。
 func (s *Store) NodeIsLive(ctx context.Context, ownerID, id uuid.UUID) (bool, error) {
 	const query = `
 WITH RECURSIVE up AS (

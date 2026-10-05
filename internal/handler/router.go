@@ -38,8 +38,8 @@ func NewRouter(deps Deps) http.Handler {
 	r.Use(chimw.RequestID)
 	r.Use(middleware.RequestLogger(deps.Logger))
 	r.Use(middleware.Recoverer(deps.Logger))
-	// 刻意不加 chi 的 Timeout / RequestSize 中间件：上传是大体积长连接，
-	// 统一限时会让大文件必然失败。超时策略放在单条路由上按需设置。
+	// 不挂 chi 的 Timeout / RequestSize 中间件：上传是大体积长连接，统一限时会掐断大文件。
+	// 超时策略放在单条路由上按需设置。
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		httpx.Fail(w, r, deps.Logger, httpx.NotFound("no such endpoint"))
@@ -49,11 +49,11 @@ func NewRouter(deps Deps) http.Handler {
 		httpx.Fail(w, r, deps.Logger, httpx.New(code, httpx.CodeInvalidRequest, "method not allowed"))
 	})
 
-	// 存活与就绪分开：healthz 不碰依赖，readyz 要求数据库可达。
+	// healthz 不碰依赖；readyz 要求数据库可达。
 	r.Get("/healthz", s.healthz)
 	r.Get("/readyz", s.readyz)
 
-	// /api/v1：auth 是公开的（注册/登录），其余全部要 Bearer token。
+	// /api/v1：auth 公开，其余需 Bearer token。
 	requireAuth := middleware.RequireAuth(deps.Logger, deps.Auth.Tokens())
 
 	r.Route("/api/v1", func(r chi.Router) {
@@ -68,33 +68,32 @@ func NewRouter(deps Deps) http.Handler {
 
 		r.Route("/files", func(r chi.Router) {
 			r.Use(requireAuth)
-			r.Post("/", s.uploadFile)               // multipart，全程流式
+			r.Post("/", s.uploadFile)               // multipart 上传，流式
 			r.Post("/dirs", s.createDir)            // 新建文件夹（JSON）
-			r.Post("/instant", s.instantUpload)     // 秒传：报 hash，命中就不收字节（JSON）
+			r.Post("/instant", s.instantUpload)     // 秒传：报 hash，命中则不收字节（JSON）
 			r.Get("/", s.listFiles)                 // ?parent_id=<uuid>|root
-			r.Get("/{id}/download", s.downloadFile) // ServeContent → Range/206 白送
-			r.Get("/{id}/zip", s.downloadZip)       // P8：整棵子树打包成 zip，流式、无 Range
-			r.Patch("/{id}", s.patchFile)           // 改名和/或移动，看给了哪个字段
-			r.Delete("/{id}", s.deleteFile)         // 弱删；文件夹连整棵子树
+			r.Get("/{id}/download", s.downloadFile) // ServeContent 提供 Range/206
+			r.Get("/{id}/zip", s.downloadZip)       // 整棵子树打包成 zip（流式，无 Range）
+			r.Patch("/{id}", s.patchFile)           // 改名和/或移动
+			r.Delete("/{id}", s.deleteFile)         // 软删；文件夹连同子树
 		})
 
-		// P7 断点续传：分片上传的状态机在 /uploads 下。
+		// 断点续传：分片上传会话。
 		r.Route("/uploads", func(r chi.Router) {
 			r.Use(requireAuth)
 			r.Post("/", s.createUpload)                     // 开会话：name / parent_id / total_size / chunk_size
-			r.Get("/", s.listUploads)                       // 列 pending 会话（丢了 session id 时找回）
+			r.Get("/", s.listUploads)                       // 列 pending 会话
 			r.Get("/{id}", s.uploadSessionStatus)           // 进度：已收到 / 还缺哪些片
 			r.Put("/{id}/parts/{part_no}", s.putUploadPart) // 传一片（原始字节，流式）
 			r.Post("/{id}/complete", s.completeUpload)      // 收尾：按序合并 + 建节点
 			r.Delete("/{id}", s.abortUpload)                // 放弃：清理分片
 		})
 
-		// P4 分享：管理要登录；匿名访问走 /share/{token}，故意**不挂** requireAuth ——
-		// 拿着 token 的人就是被授权的人（校验在 service 里做）。
+		// 分享：管理需登录；匿名访问走 /share/{token}，不挂 requireAuth，校验在 service。
 		r.Route("/shares", func(r chi.Router) {
 			r.Use(requireAuth)
 			r.Post("/", s.createShare)       // 建：{node_id, expires_in_seconds?}
-			r.Get("/", s.listShares)         // 列我建过的
+			r.Get("/", s.listShares)         // 列自己建的分享
 			r.Delete("/{id}", s.deleteShare) // 撤销
 		})
 		r.Get("/share/{token}", s.resolveShare)              // 匿名打开（文件/文件夹元信息）

@@ -29,7 +29,7 @@ func newTestLocal(t *testing.T) *Local {
 	return l
 }
 
-// countFiles 数根目录下还有几个文件 —— 临时文件没清干净会在这里现形。
+// countFiles 数根目录下的文件数；临时文件未清理会在此暴露。
 func countFiles(t *testing.T, dir string) int {
 	t.Helper()
 	n := 0
@@ -88,7 +88,7 @@ func TestPutAcceptsUnknownSize(t *testing.T) {
 	}
 }
 
-// errReader 在读的过程中抛错，模拟"传到一半断线"。
+// errReader 在读时抛错，模拟传输中断。
 type errReader struct{ err error }
 
 func (e errReader) Read([]byte) (int, error) { return 0, e.err }
@@ -145,13 +145,11 @@ func TestOpenMissingReturnsErrNotFound(t *testing.T) {
 	}
 }
 
-// 下面两条验的是已经写好的骨架代码，现在就应该绿。
-
 func TestDeleteThenStatNotFound(t *testing.T) {
 	l := newTestLocal(t)
 	ctx := context.Background()
 
-	// 直接落文件造对象，不经过 Put —— 这一条不该被"Put 还没实现"带红。
+	// 直接落文件造对象，不经过 Put。
 	p, err := l.keyPath("blobs/d")
 	if err != nil {
 		t.Fatalf("keyPath: %v", err)

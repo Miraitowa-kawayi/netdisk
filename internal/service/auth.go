@@ -17,14 +17,12 @@ const (
 	minUsernameLen = 3
 	maxUsernameLen = 32
 	minPasswordLen = 8
-	maxPasswordLen = 72 // bcrypt 只看前 72 字节，再长就是静默截断，不如直接拒绝
+	maxPasswordLen = 72 // bcrypt 只看前 72 字节
 )
 
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-// dummyHash 让"用户不存在"这条路径也走一次 bcrypt。
-// 否则不存在的用户名会立刻返回，响应时间比"密码错"短一截，
-// 攻击者能用时间差把用户名枚举出来。
+// dummyHash 供"用户不存在"路径也走一次 bcrypt，使两条失败路径耗时一致。
 var dummyHash, _ = bcrypt.GenerateFromPassword([]byte("netdisk-dummy-password"), bcrypt.DefaultCost)
 
 // Auth 负责注册、登录与当前用户查询。
@@ -87,7 +85,7 @@ func (a *Auth) Login(ctx context.Context, username, password string) (model.User
 func (a *Auth) Me(ctx context.Context, userID uuid.UUID) (model.User, error) {
 	user, err := a.store.GetUserByID(ctx, userID)
 	if errors.Is(err, repository.ErrNotFound) {
-		// token 签名有效但用户已经被删：按未认证处理，别返回一个孤儿身份
+		// token 有效但用户已被删：按未认证处理
 		return model.User{}, ErrInvalidCredentials
 	}
 	return user, err

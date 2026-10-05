@@ -10,8 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// createShareRequest 是 POST /shares 的请求体。
-// expires_in_seconds 缺省或 0 = 永不过期。
+// createShareRequest 是 POST /shares 的请求体，expires_in_seconds 缺省或 0 表示永不过期。
 type createShareRequest struct {
 	NodeID           string `json:"node_id"`
 	ExpiresInSeconds int64  `json:"expires_in_seconds"`
@@ -52,7 +51,7 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"share": view.Share, "url": view.URL})
 }
 
-// listShares 列我建过的分享。
+// listShares 列当前用户创建的分享。
 func (s *Server) listShares(w http.ResponseWriter, r *http.Request) {
 	uid, ok := userID(r)
 	if !ok {
@@ -88,8 +87,7 @@ func (s *Server) deleteShare(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusNoContent, nil)
 }
 
-// resolveShare 匿名打开一条分享（本路由不挂 requireAuth）：
-// 返回目标节点元信息，目录时连直接子项一起给。
+// resolveShare 匿名打开一条分享，返回目标节点元信息，目录时连直接子项一起返回。
 func (s *Server) resolveShare(w http.ResponseWriter, r *http.Request) {
 	view, err := s.deps.Shares.Resolve(r.Context(), chi.URLParam(r, "token"))
 	if err != nil {
@@ -102,8 +100,7 @@ func (s *Server) resolveShare(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// downloadViaShare 匿名下载（同样不挂 requireAuth）。
-// ?node_id=<uuid> 可选：分享的是目录时用来指定下哪一项；不传就下分享的那个节点本身。
+// downloadViaShare 匿名下载；?node_id=<uuid> 可选，分享目录时指定下载的子项。
 func (s *Server) downloadViaShare(w http.ResponseWriter, r *http.Request) {
 	var target *uuid.UUID
 	if raw := r.URL.Query().Get("node_id"); raw != "" {

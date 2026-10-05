@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// createUploadRequest 是 POST /uploads 的请求体：开一次分片上传的意图。
+// createUploadRequest 是 POST /uploads 的请求体。
 type createUploadRequest struct {
 	Name      string `json:"name"`
 	ParentID  string `json:"parent_id"`
@@ -58,7 +58,7 @@ func (s *Server) createUpload(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"session": sess})
 }
 
-// listUploads 列当前用户还没收尾的会话（客户端丢了 session id 时用来找回）。
+// listUploads 列当前用户未收尾的会话。
 func (s *Server) listUploads(w http.ResponseWriter, r *http.Request) {
 	uid, ok := userID(r)
 	if !ok {
@@ -73,7 +73,7 @@ func (s *Server) listUploads(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
 }
 
-// uploadSessionStatus 返回会话进度：已收到 / 还缺哪些分片 —— 断点续传的"读状态"那一步。
+// uploadSessionStatus 返回会话进度：已收到与缺失的分片号。
 func (s *Server) uploadSessionStatus(w http.ResponseWriter, r *http.Request) {
 	uid, ok := userID(r)
 	if !ok {
@@ -98,8 +98,8 @@ func (s *Server) uploadSessionStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// putUploadPart 收一个分片。请求体就是该片的原始字节（application/octet-stream），
-// 全程流式写进存储 —— 不缓冲、不进内存。重复 PUT 同一 part_no 是幂等的（覆盖）。
+// putUploadPart 收一个分片，请求体为该片的原始字节（application/octet-stream），流式写入存储。
+// 重复 PUT 同一 part_no 幂等（覆盖）。
 func (s *Server) putUploadPart(w http.ResponseWriter, r *http.Request) {
 	uid, ok := userID(r)
 	if !ok {

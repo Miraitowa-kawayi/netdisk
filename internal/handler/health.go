@@ -8,13 +8,12 @@ import (
 	"github.com/Miraitowa-kawayi/netdisk/internal/httpx"
 )
 
-// healthz 只表示进程活着 —— 不碰任何依赖，这样数据库挂了也能探到进程本身的状态。
+// healthz 只表示进程存活，不检查依赖。
 func (s *Server) healthz(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// readyz 表示"能对外服务"：依赖必须可用。注意别用它做保活探针，
-// 否则数据库抖一下容器就会被重启。
+// readyz 表示依赖可用、能对外服务；不要用它做保活探针。
 func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()

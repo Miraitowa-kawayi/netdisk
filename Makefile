@@ -20,14 +20,14 @@ vet:
 up:
 	docker compose up -d postgres
 
-# 数据库 + 对象存储（P6 用）
+# 数据库 + 对象存储
 up-all:
 	docker compose --profile objectstore up -d
 
 down:
 	docker compose down
 
-# 重建数据库：改过 migrations/*.sql 之后用这个（脚本只在空数据卷时执行）
+# 重建数据库：改过 migrations/*.sql 后使用（脚本只在空数据卷时执行一次）
 reset:
 	docker compose down -v
 	docker compose up -d postgres

@@ -35,7 +35,7 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	// SIGINT / SIGTERM 取消这个 context，触发下面的优雅退出。
+	// SIGINT / SIGTERM 取消 context，触发优雅退出。
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -45,14 +45,14 @@ func run(logger *slog.Logger) error {
 	}
 	defer store.Close()
 
-	// 启动时探测一次数据库，把"配置写错"这种问题尽早暴露出来。
+	// 启动时探测数据库，尽早暴露配置错误。
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := store.Ping(pingCtx); err != nil {
 		return err
 	}
 
-	// 内容存哪里：D1 只有 local，P6 会加 s3，上层只认 storage.Storage 接口。
+	// 内容存储后端：上层只依赖 storage.Storage 接口。
 	var blobStore storage.Storage
 	switch cfg.StorageDriver {
 	case "local":
@@ -82,8 +82,7 @@ func run(logger *slog.Logger) error {
 			Uploads: uploads,
 			Shares:  shares,
 		}),
-		// 只限制读请求头的时间，防止慢速连接占坑；
-		// 不设 ReadTimeout / WriteTimeout —— 上传下载都是大体积长连接，设了必然中途掐断。
+		// 只设 ReadHeaderTimeout；上传下载是大体积长连接，Read/WriteTimeout 会中途掐断。
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

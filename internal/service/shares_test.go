@@ -19,13 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ---------------------------------------------------------------------------
-// 分享链接的业务契约。打真库（先 `make up`），库不可达时 Skip —— SKIP ≠ 过。
-//
-// 覆盖两条最容易出错的线：
-//   - 匿名访问**必须**沿祖先链校验（弱删的目录不能让里面的文件还能下）；
-//   - 目录分享时，只有这棵子树里的节点能下载，别的一律 NotFound。
-// ---------------------------------------------------------------------------
+// 分享链接的测试打真库（先跑 `make up`），库不可达时跳过。
 
 type shareFixture struct {
 	shares  *Shares
@@ -50,7 +44,7 @@ func newShareFixture(t *testing.T) *shareFixture {
 	}
 	if err := st.Ping(ctx); err != nil {
 		st.Close()
-		t.Skipf("跳过：数据库不可达（%v）—— 先跑 `make up`", err)
+		t.Skipf("跳过：数据库不可达（%v）；先跑 `make up`", err)
 	}
 	t.Cleanup(st.Close)
 
@@ -90,8 +84,7 @@ func (f *shareFixture) newUser(t *testing.T) uuid.UUID {
 	return u.ID
 }
 
-// upload 用普通上传建一个文件节点，并登记用例结束后清掉它的 blob 行
-// （blob 不随用户级联删除，得自己收）。
+// upload 建一个文件节点，并登记用例结束后删除它的 blob 行（blob 不随用户级联删除）。
 func (f *shareFixture) upload(t *testing.T, parent *uuid.UUID, name, content string) model.Node {
 	t.Helper()
 	node, err := f.files.Upload(f.ctx, UploadInput{
@@ -248,7 +241,7 @@ func TestShareDiesWhenAncestorDeleted(t *testing.T) {
 		t.Fatalf("删之前应该能访问: %v", err)
 	}
 
-	// 文件自己没被删，删的是它的父目录 —— 弱删 + 祖先链校验就体现在这里。
+	// 删的是父目录，文件本身没被删。
 	if err := f.files.Delete(f.ctx, f.owner, dir.ID); err != nil {
 		t.Fatalf("删父目录: %v", err)
 	}

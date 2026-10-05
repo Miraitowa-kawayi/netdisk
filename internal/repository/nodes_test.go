@@ -9,16 +9,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// ---------------------------------------------------------------------------
-// 测试脚手架
-//
-// 这些用例打的是**真数据库** —— 递归 CTE 这种东西，假一个出来测不出什么。
-// 库连不上就 Skip，让 `go test ./...` 在没有数据库的环境里也能跑完。
-//
-// 每个用例建一个自己的用户（用户名带随机后缀），t.Cleanup 里删掉它：
-// users → nodes 是 ON DELETE CASCADE，于是整棵测试树跟着一起清干净，
-// 不会在开发库里留垃圾。
-// ---------------------------------------------------------------------------
+// 用例打真数据库（先跑 `make up`），库不可达时跳过。
+// 每个用例建一个自己的用户，t.Cleanup 删除它，节点随 ON DELETE CASCADE 一并清除。
 
 const fallbackTestDSN = "postgres://netdisk:netdisk@localhost:5433/netdisk?sslmode=disable"
 
@@ -36,7 +28,7 @@ func newTestStore(t *testing.T) (*Store, context.Context) {
 	}
 	if err := st.Ping(ctx); err != nil {
 		st.Close()
-		t.Skipf("跳过：数据库不可达（%v）—— 先跑 `make up`", err)
+		t.Skipf("跳过：数据库不可达（%v）；先跑 `make up`", err)
 	}
 	t.Cleanup(st.Close)
 	return st, ctx
@@ -89,11 +81,6 @@ func newFixture(t *testing.T, st *Store, ctx context.Context) fixture {
 }
 
 func ptr(id uuid.UUID) *uuid.UUID { return &id }
-
-// ---------------------------------------------------------------------------
-// D2 的契约：环检测
-// 实现 repository/nodes.go 的 IsSelfOrDescendant 之前，这一组是红的。
-// ---------------------------------------------------------------------------
 
 func TestIsSelfOrDescendant(t *testing.T) {
 	st, ctx := newTestStore(t)
@@ -153,7 +140,7 @@ func TestIsSelfOrDescendantOtherOwnerIsFalse(t *testing.T) {
 	st, ctx := newTestStore(t)
 	f := newFixture(t, st, ctx)
 
-	// 另一个用户下的同名目录，不能被当成"我的子孙"。
+	// 另一个用户下的同名目录不算"我的子孙"。
 	other := newTestUser(t, st, ctx)
 	otherNode, err := st.CreateNode(ctx, other, nil, "A", true, 0, nil)
 	if err != nil {
@@ -177,7 +164,7 @@ func TestIsSelfOrDescendantDeletedNodeIsFalse(t *testing.T) {
 		t.Fatalf("SoftDeleteSubtree: %v", err)
 	}
 
-	// A 整棵被弱删之后，C 不该再被算成 A 的子孙。
+	// A 整棵被软删后，C 不应再算作 A 的子孙。
 	got, err := st.IsSelfOrDescendant(ctx, f.owner, f.c, f.a)
 	if err != nil {
 		t.Fatalf("IsSelfOrDescendant: %v", err)
@@ -226,7 +213,7 @@ func TestUpdateNode(t *testing.T) {
 	st, ctx := newTestStore(t)
 	f := newFixture(t, st, ctx)
 
-	// 移动：把 C 移到根目录（parentID 传 nil，但 setParent 为 true）
+	// 把 C 移到根目录（parentID 为 nil，setParent 为 true）
 	n, err := st.UpdateNode(ctx, f.owner, f.c, nil, nil, true)
 	if err != nil {
 		t.Fatalf("移到根目录: %v", err)
@@ -235,7 +222,7 @@ func TestUpdateNode(t *testing.T) {
 		t.Errorf("移到根目录后 parent_id 应为 NULL，实得 %v", *n.ParentID)
 	}
 
-	// 只改名：父目录必须原地不动
+	// 只改名，父目录不变
 	newName := "C2"
 	if n, err = st.UpdateNode(ctx, f.owner, f.c, &newName, nil, false); err != nil {
 		t.Fatalf("改名: %v", err)
@@ -244,7 +231,7 @@ func TestUpdateNode(t *testing.T) {
 		t.Errorf("改名结果不对: name=%q parent=%v", n.Name, n.ParentID)
 	}
 
-	// 改名 + 移动一起做
+	// 改名并移动
 	newName = "D2"
 	if n, err = st.UpdateNode(ctx, f.owner, f.d, &newName, ptr(f.e), true); err != nil {
 		t.Fatalf("改名+移动: %v", err)
@@ -253,7 +240,7 @@ func TestUpdateNode(t *testing.T) {
 		t.Errorf("改名+移动结果不对: name=%q parent=%v", n.Name, n.ParentID)
 	}
 
-	// 同层重名：根目录上已经有 E 了
+	// 同层重名（根目录已有 E）
 	dup := "E"
 	if _, err := st.UpdateNode(ctx, f.owner, f.c, &dup, nil, false); !errors.Is(err, ErrUniqueViolation) {
 		t.Errorf("同层重名 = %v, want ErrUniqueViolation", err)

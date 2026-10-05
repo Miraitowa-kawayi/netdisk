@@ -1,7 +1,5 @@
 // Package httpx 统一 HTTP 层的响应格式与错误码。
-//
-// 约定：所有错误响应都是 {"error":{"code":"...","message":"..."}}；
-// code 是对外稳定的机器可读标识，HTTP 状态码只作粗粒度提示。
+// 错误响应固定为 {"error":{"code":"...","message":"..."}}，code 对外稳定，HTTP 状态码只作粗粒度提示。
 package httpx
 
 import (
@@ -22,7 +20,7 @@ const (
 	CodeInternal       = "internal_error"
 )
 
-// Error 是贯穿各层的应用错误。Err 保存内部原因，只写日志，绝不返回给客户端。
+// Error 是贯穿各层的应用错误；Err 只写日志，不返回给客户端。
 type Error struct {
 	Status  int
 	Code    string
@@ -39,7 +37,7 @@ func (e *Error) Error() string {
 
 func (e *Error) Unwrap() error { return e.Err }
 
-// With 把内部错误挂上来，链式使用：httpx.NotFound("x").With(err)
+// With 挂上内部错误，链式调用：httpx.NotFound("x").With(err)
 func (e *Error) With(err error) *Error {
 	e.Err = err
 	return e
@@ -89,8 +87,7 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 	}
 }
 
-// Fail 把任意错误翻译成 JSON 错误响应。
-// 非 *Error 一律按 500 处理，并且只把细节写进日志 —— 不泄露内部状态给客户端。
+// Fail 把错误翻译成 JSON 错误响应；非 *Error 一律按 500 处理，细节只写日志。
 func Fail(w http.ResponseWriter, r *http.Request, logger *slog.Logger, err error) {
 	appErr := New(http.StatusInternalServerError, CodeInternal, "internal error")
 	if !errors.As(err, &appErr) {

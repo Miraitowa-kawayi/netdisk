@@ -26,13 +26,13 @@ func (s *Store) CreateUser(ctx context.Context, username, passwordHash, nickname
 	return scanUser(row)
 }
 
-// GetUserByUsername 按用户名查（登录用）。查不到返回 ErrNotFound。
+// GetUserByUsername 按用户名查询（登录用），查不到返回 ErrNotFound。
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (model.User, error) {
 	row := s.pool.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE username = $1`, username)
 	return scanUser(row)
 }
 
-// GetUserByID 按 id 查（/me、鉴权后需要用户信息时）。查不到返回 ErrNotFound。
+// GetUserByID 按 id 查询，查不到返回 ErrNotFound。
 func (s *Store) GetUserByID(ctx context.Context, id uuid.UUID) (model.User, error) {
 	row := s.pool.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE id = $1`, id)
 	return scanUser(row)
