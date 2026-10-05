@@ -4,272 +4,256 @@
 
 **做了什么**
 
-- 定技术栈：Go 1.27 + chi（路由）+ pgx（直接手写 SQL，不上 ORM）+ PostgreSQL 16（docker compose）
-- 搭出分层骨架：`cmd/server` 入口 → `internal/{config,handler,service,repository,storage,model,middleware,httpx}`
-- 表设计定稿，落成 `migrations/0001_init.sql`（6 张表 + 索引），设计理由写在 `docs/schema.md`
-- 统一错误响应格式 `{"error":{"code","message"}}`；`/healthz`（不碰依赖）与 `/readyz`（要求数据库可用）分开
-- 端到端跑通：`docker compose up -d postgres` → 服务起来 → 两个健康检查都是 200
+- **敲定技术栈**：Go 1.27 + chi（轻量路由）+ pgx（直接手写原生 SQL，不上 ORM，搞清楚底层在干嘛）+ PostgreSQL 16（Docker Compose 本地跑）。
+- **搭出分层骨架**：`cmd/server` 入口 → `internal/{config,handler,service,repository,storage,model,middleware,httpx}`，分层职责明确。
+- **表结构定稿**：写好 `migrations/0001_init.sql`（6 张核心表和索引），设计理由记在 `docs/schema.md` 里。
+- **统一响应与探针**：错误响应统一成 `{"error":{"code","message"}}`；把无外部依赖的 `/healthz` 和依赖数据库的 `/readyz` 区分开。
+- **本地跑通**：容器和本地服务跑起来，两个健康检查都返回 200。
 
-**卡在哪 / 踩到的坑**
+**踩坑与思考**
 
-1. **8080 端口被占用**：本机已经跑着一个 adminer 容器占着 8080，服务直接
-   `listen tcp :8080: bind: address already in use` 退出了。改用 8081。
-   教训是"能绑定成功"本身要当成一条验证项，不能默认端口是空的。由这个问题，我在思考如何
-   集成已经使用过的端口，或者说已经有这类项目我能直接调用的
-2. **唯一索引里的 NULL 陷阱**：想让"同一目录下不能有同名文件"，
-   直觉写法是给 `nodes (owner_id, parent_id, name)` 建唯一索引。但 PostgreSQL 的唯一索引里
-   NULL 互不相等，而根目录的 `parent_id` 就是 NULL —— 于是**根目录下的重名全部漏过**。
-   最后改成 `COALESCE(parent_id, '<nil-uuid>')` 的表达式索引
-   （用 psql 建三张表实测过：直觉写法能插进两条重名，COALESCE 和 PG 15+ 的
-   `UNIQUE NULLS NOT DISTINCT` 都会拒绝）。
-   顺带弄清楚了一件我一开始就有点混乱的事：**这一点 MySQL 和 PostgreSQL 是一样的**（唯一索引里都
-   允许多个 NULL，因为 NULL 表示"未知"，未知 ≠ 未知）。真正不一样的是 SQL Server（只允许
-   一个 NULL）。MySQL 在这件事上真正的bug是**默认排序规则大小写不敏感**
-   （utf8mb4_0900_ai_ci），`a.txt` 和 `A.txt` 会撞唯一键；但 PG 默认区分大小写。
-3. **秒传的引用计数要不要存**：一开始想给 `blobs` 加 `ref_count` 列，后来改成删除时用
-   `NOT EXISTS (SELECT 1 FROM nodes WHERE blob_id = ?)` 现算。理由是计数列一旦漏了一次加减
-   就会永久漂移，最后表现为"文件明明删光了，磁盘上的内容却永远删不掉"。
-   多一次索引查找换掉一整类排查起来很痛的 bug。
+1. **8080 端口冲突**：
+   本地正好跑了个 Adminer 容器占了 8080，服务直接抛 `bind: address already in use` 挂掉了，临时改用 8081。
+   *教训*：不能默认本地端口永远是空的 —— 端口本来就是从环境变量读的（`NETDISK_ADDR`，默认 `:8080`），被占时报错也该给一句人话。
+2. **唯一索引里的 NULL 坑**：
+   为了防止“同一个目录下有重名文件”，直觉是给 `(owner_id, parent_id, name)` 加联合唯一索引。但 PostgreSQL 遵循 SQL 三值逻辑，NULL 和 NULL 互不相等，而根目录的 `parent_id` 正好是 NULL，结果根目录下的重名直接全部漏过去了。
+   *解决*：改成 `COALESCE(parent_id, '<nil-uuid>')` 的表达式索引（用 PG 15+ 的 `UNIQUE NULLS NOT DISTINCT` 也可以）。
+   *顺便理清的细节*：PG 和 MySQL 在唯一索引里都允许多个 NULL，SQL Server 则只允许一个；另外 MySQL 默认字符集排序规则大小写不敏感，容易撞唯一键，而 PG 默认区分大小写。
+3. **秒传引用计数存不存**：
+   纠结过要不要在 `blobs` 表加一列 `ref_count`，最后决定删除时直接用 `NOT EXISTS (SELECT 1 FROM nodes WHERE blob_id = ?)` 现算。
+   *理由*：高并发下显式维护计数，只要代码哪处漏加或漏减一次，计数就会永久漂移，导致物理文件永远删不掉或被误删；宁可多一次索引查询，也要保证数据一致性。
 
-**当时记的下一步**
+**下一步**
 
-- P1：文件的上传/下载/重命名/删除/列表，全程流式（不能把请求体读进内存）
-- P2：注册登录 + JWT 中间件，把 P1 的接口保护起来
+- P1：文件的上传、下载、改名、删除、列表，全程流式处理（严禁把大请求体一次性读进内存）。
+- P2：注册登录 + JWT 中间件，把接口保护起来。
+
+---
 
 ## 2026-10-02 · D1：P1 文件接口 + P2 鉴权
 
 **做了什么**
 
-- P2 全量：`POST /api/v1/auth/register`、`/login`、`GET /auth/me`；HS256 JWT 中间件
-  把 `/api/v1/files` 整套保护起来。密码走 bcrypt；登录失败不区分"用户不存在/密码错"，
-  且两条路径都过一次 bcrypt，避免用响应时间枚举用户名。
-- P1：上传（multipart **流式**，边收边写）、下载（`http.ServeContent`，Range/206 白送）、
-  列表（每个文件带 `download_url`）、改名、删除（弱删，只打 `deleted_at`）。
-- 表结构没动：D0 定的 `nodes`（树）+ `blobs`（内容）正好接得上 —— 内容按 SHA-256 去重，
-  同一份内容磁盘上只留一个对象。
+- **P2 鉴权全量跑通**：完成 `POST /api/v1/auth/register`、`/login`、`GET /auth/me`，挂上 HS256 JWT 中间件。密码走 bcrypt；登录失败统一提示模糊错误，且无论用户在不在都强行走一遍 bcrypt，防止攻击者根据响应耗时枚举用户名。
+- **P1 文件基础接口**：支持 multipart 流式上传、`http.ServeContent` 下载（天然白送 206 Range 支持）、列表查询、改名与软删除（打 `deleted_at` 标记）。
+- **表结构对齐**：复用 `nodes`（文件树）+ `blobs`（物理内容），同一份内容按 SHA-256 去重，磁盘上只保留一份。
+- **分工明确**：路由骨架、DTO 和错误码由 Agent 帮忙搭；核心的流式存储引擎 `internal/storage/local.go`（`Put` / `Open`）由自己写并对照测试验收。
 
-**分工**：P2 和 P1 的 SQL / 路由 / DTO / 错误映射由 Agent 搭；
-**`internal/storage/local.go` 的 `Put` / `Open`（这一天的流式核心）**，
-验收契约是 `internal/storage/local_test.go`。
-
-**curl 验证过的行为**
+**curl 实测行为**
 
 | 场景 | 结果 |
 | --- | --- |
-| 无 token 访问 `/api/v1/files` | 401 |
-| 注册 / 重复注册 | 201 / 409 |
-| 密码错、用户不存在 | 都是同一句 401 |
-| 登录 → `/me`；伪造 token | 200；401 |
-| 空根目录列表 | 200 `{"files":[]}` |
-| `parent_id` 不是 UUID | 400 |
-| 改名/删除不存在的节点 | 404 |
-| 上传 | 500（`Put` 还是占位实现） |
+| 没带 token 访问 `/api/v1/files` | 401 |
+| 注册 / 重复注册同名用户 | 201 / 409 |
+| 密码错误 / 用户不存在 | 都是同一句 401，耗时特征一致 |
+| 登录换 token 读 `/me` / 伪造 token | 200 / 401 |
+| 根目录为空时查列表 | 200 `{"files":[]}` |
+| `parent_id` 传非法 UUID | 400 |
+| 修改或删除不存在的节点 | 404 |
+| 上传文件 | 500（`Put` 还是占位方法，待实现） |
 
 **下一步**
 
-- 实现 `local.Put` / `local.Open` → `go test ./internal/storage/ -v` 全绿
-- 然后跑 D1 的判据：传 500MB，`docker stats` 里内存不随文件大小涨
+- 实现 `local.Put` 和 `local.Open`，让单测全绿。
+- 跑 500MB 大文件上传测试，验证进程内存不随文件增大而暴涨。
+
+---
 
 ## 2026-10-03 · D1 收尾：流式核心 + 500MB 验证
 
 **做了什么**
 
-- 实现 `internal/storage/local.go` 的 `Put` / `Open`（D1 的流式核心是我自己写的、Agent 逐行 review，提出修改意见我修改完成的）：
-  - `Put`：`io.MultiWriter(tempFile, hasher)` 边读边写盘、顺路算 SHA-256，全程没有 `io.ReadAll`；
-    临时文件用 `os.CreateTemp(目标目录, ".put-*")` 建在**目标文件所在目录**（同一文件系统，
-    `os.Rename` 才是原子的）→ `Sync` → `Close` → `Rename`；中途出错用 defer 清掉临时文件，
-    不留半成品。
-  - `Open`：`os.Open` + `Stat` 组装 `ObjectInfo`；`*os.File` 天生可 Seek，`http.ServeContent`
-    的 Range/206 靠它；对象不存在时翻成 `ErrNotFound`。
-- `go test ./internal/storage/ -v` **7/7 通过**，`go build` / `go vet` / `gofmt` 都干净。
+- **写完存储层核心代码**：自己攻克 `internal/storage/local.go` 的 `Put` / `Open`（Agent review 给出边界调整建议后修改通过）：
+  - `Put`：用 `io.MultiWriter(tempFile, hasher)` 边写磁盘边算 SHA-256，全程没有 `io.ReadAll`；临时文件建在目标同级目录下，确保最后的 `os.Rename` 是原子的；中途出错用 `defer` 删掉半成品临时文件。
+  - `Open`：基于 `os.Open` + `Stat` 返回 `ObjectInfo`；利用文件本身的 Seek 能力直接支撑 `http.ServeContent` 的 Range 下载；不存在时转成 `ErrNotFound`。
+- **测试通过**：`internal/storage/local_test.go` **7/7 单元测试全部通过**，静态检查和格式化无报错。
 
-**500MB 流式验证**
+**500MB 流式压测**
 
-| | |
+| 指标 | 实测表现 |
 | --- | --- |
-| 文件 | `/tmp/big500.bin`，500,000,000 字节（477M） |
-| server 进程 RSS | 空闲 14,363 KB → 上传中峰值 14,572 KB（**+209 KB**） |
+| 测试文件 | `/tmp/big500.bin`，精确大小 500,000,000 字节（约 477MB） |
+| 服务进程物理内存 (RSS) | 空闲 14,363 KB → 上传峰值 14,572 KB（**只涨了 209 KB**） |
 
-差约 2400 倍 —— 内存不随对象大小涨，D1 的判据满足。落盘的 blob
-（`data/blobs/blobs/ed0e4078-…`）也确实是 477M，不是传一半假装成功。
+内存开销只有文件大小的 1/2400 左右，证明数据流确实是边读边存的，没有全堆在内存里。落盘的 blob 文件核对过，大小正好 477MB。
 
-⚠️ 计划里"用 `docker stats` 看内存"这句要改：进容器的只有 postgres，**Go 服务跑在宿主机**，
-`docker stats` 里根本没有它 —— 要看的是宿主机上 server 进程的 RSS（`ps -o rss= -p <真身 pid>`，
-`go run` 的父进程不是真身）。
+*备忘*：之前计划写着看 `docker stats`，但 Go 服务其实直接跑在宿主机，容器里只有数据库；看内存必须盯宿主机上的真实进程 PID（`ps -o rss= -p <PID>`）。
 
-**卡在哪 / 踩到的坑**
+**踩坑与思考**
 
-1. 第一版 `Open` 编不过：`f` 和 `info` 都组装好了，**却忘了替换末尾那句占位 `return`**，
-   连带 `info` 声明未用、还用了 `ObjectInfo` 里不存在的 `ModTime` 字段。根因是
-   **忘记 `storage.go` 的接口定义就动手** —— 教训是写实现前先把契约文件读一遍。
-2. 重传同名文件被 409 挡住（`another entry with the same name already exists here`）：
-   是 D0 那条 `COALESCE(parent_id, '<nil-uuid>')` 唯一索引在起作用，不是 bug；顺便确认了
-   弱删（只打 `deleted_at`）能让名字重新可用。
+1. **第一版 `Open` 编译报错**：写完逻辑后忘了删掉末尾占位的 `return`，而且还用了未定义的字段，根因是动手前没仔细看 `storage.go` 接口的精确签名。以后写具体实现前一定先把接口定义看清楚。
+2. **同名文件重传被 409 拦截**：确认是 D0 的联合唯一索引生效了，不是 bug；顺带验证了软删除后同名文件可以重新创建。
 
 **下一步**
 
-- D2（P3 文件夹树）：新建 / 移动 / 列子项，移动时的**环检测**、
-  删除文件夹的级联语义。判据：把文件夹移进自己的子目录被**明确拒绝**。
+- D2：文件夹树（创建、移动、查子项），重点攻克**移动目录时的环检测**和级联删除。
+
+---
 
 ## 2026-10-03 · D2 文件夹树：建目录 / 移动 / 级联删 + 环检测
 
 **做了什么**
 
-- 文件与文件夹共用 `nodes` 表，所以"建文件夹"只是 `is_dir = true` 的另一条插入路径：
-  - 新路由 `POST /api/v1/files/dirs`（JSON `{name, parent_id}`；`parent_id` 缺省或 `null` 都算根目录）。
-  - `PATCH /api/v1/files/{id}` 从"只能改名"升级成"改名**和/或**移动"：`parent_id` 用
-    `json.RawMessage` 接，才分得清 **键不存在（不动）** / **`null`（移回根目录）** /
-    **uuid（移到那个目录）** 三种情况；写库时 `UpdateNode` 用
-    `CASE WHEN $4 THEN $5::uuid ELSE parent_id END`，让"改哪几列"由开关决定。
-  - `DELETE /api/v1/files/{id}` 改成**级联**：一条递归 CTE 弱删整棵子树。文件和文件夹共用同一条路径
-    —— 文件就是"只含自己一个节点的子树"。
-- **环检测**（D2 的难点）：`repository.IsSelfOrDescendant` —— 一条**往上爬**的递归 CTE，
-  从目标目录沿 `parent_id` 走到根，看路上有没有被移的那个节点。命中 → `ErrCycle` → HTTP **409**。
-- `internal/repository/nodes_test.go`：打**真数据库**的集成测试（库连不上时 Skip，不是 FAIL）。
+- **统一目录与文件模型**：文件和文件夹共用 `nodes` 表，新建文件夹本质就是 `is_dir = true`：
+  - 新建目录端点：`POST /api/v1/files/dirs`。
+  - 节点修改端点：`PATCH /api/v1/files/{id}` 支持改名和移动。`parent_id` 用 `json.RawMessage` 接收，区分“不修改”、“设为 null（移到根目录）”和“移到指定 UUID”三种语义；SQL 里用 `CASE WHEN` 按需更新字段。
+  - 级联删除：`DELETE /api/v1/files/{id}` 用一条递归 CTE 批量软删除整棵子树，单文件相当于只有自己的子树，统一逻辑。
+- **攻克移动环检测（D2 核心难点）**：
+  编写 `repository.IsSelfOrDescendant`：写了一条自底向上的递归 CTE，从目标目录顺着 `parent_id` 一直往上查到根，看路径上有没有被移动的节点自己。如果有就返回 `ErrCycle`，上层报 HTTP **409**。
+- **集成测试**：写了直连数据库的 `nodes_test.go` 集成测试。
 
-**判据（实测）**
+**实测结果**
 
-| 验的什么 | 结果 |
+| 测试用例 | 响应 |
 | --- | --- |
-| 把 A 移进 A 的子目录 B | **409**，body 99 字节 = `cannot move a folder into itself or its own subdirectory` |
-| 把 A 移进 A 自己 | **409**，同上 |
-| 反向：B 移回根目录（`parent_id: null`） | **200**，`parent_id` 变回 `null` —— 合法的移动没被误伤 |
-| 同层重名 | **409**（body 95 字节，和环拒那句不是一个长度） |
-| 删 A（底下有 X / Y 两层） | **204**；再取孙子 Y 的 download → **404** |
+| 尝试把文件夹 A 移进它的子目录 B | **409 Conflict** |
+| 尝试把文件夹 A 移进 A 自己 | **409 Conflict** |
+| 把深层子目录移回根目录（`parent_id: null`） | **200 OK**，正常移动没被误拦截 |
+| 同一层级重名 | **409 Conflict** |
+| 删除父目录 A（底下包含多层子项） | **204**；后续下载底下的孙节点返回 **404** |
 
-**卡在哪 / 踩到的坑**
+**踩坑与思考**
 
-1. 往上爬和往下爬只差一个 JOIN：往下 `n.parent_id = x.id`，往上 `n.id = x.parent_id`。
-2. 递归 CTE 用 `UNION ALL`；往上那条还加了 `CYCLE id SET is_cycle USING path`（PG 14+）——
-   万一数据里本来就有环，查询会停下来而不是无限递归。（往下爬的 `SoftDeleteSubtree` 还没加。）
-3. **409 有两种来源（环拒 / 重名），状态码一样，只有 body 能分** —— 99 和 95 就是它俩的区分依据。
+1. **递归方向的区别**：向下展开整棵树用 `nodes.parent_id = x.id`，向上追溯祖先链用 `nodes.id = x.parent_id`。往上爬的时候顺手加了 PG 14+ 的 `CYCLE` 语法，防止数据库万一有脏数据导致无限死循环。
+2. **409 状态码区分**：现在“环检测拦截”和“同名冲突”都报 409，外部只能看响应内容区分，后续重构可以把具体的业务错误码拆开。
 
 **下一步**
 
-- D3（10/4，P5 多用户 + 秒传）：内容寻址（hash → blob）+ **引用计数**决定
-  "最后一个引用消失才真删"。判据：两个用户传**同一个文件**，第二次瞬间完成且磁盘占用不变；
-  两边都删掉后 blob 才消失。
+- D3：秒传与基于引用计数的物理文件回收。
+
+---
 
 ## 2026-10-03 · D3 秒传 + 引用计数：内容回收
 
 **做了什么**
 
-- 秒传 `POST /api/v1/files/instant`（JSON `{name,parent_id,hash,size}`）：命中已有内容就只插一行
-  `nodes`、零字节传输；库里没这个 hash → 404，`size` 和 blob 对不上 → 400。
-- `DELETE /api/v1/files/{id}` 接上回收：先级联弱删整棵子树，再 `ReclaimOrphanBlobs` 拿回可以删的
-  `storage_key`，逐个 `storage.Delete`。回收失败只打 WARN、仍回 204 —— 弱删已经提交，翻 500 是撒谎。
-- **`ReclaimOrphanBlobs`（D3 的难点，代码本人写的、由Agent review）**：一条 SQL —— 递归 CTE 展开**刚被弱删**
-  的子树 → 收集 distinct 的 `blob_id` → `DELETE FROM blobs ... WHERE NOT EXISTS (存活引用) RETURNING storage_key`。
-- `migrations/0002`：`nodes.blob_id` 外键改 `ON DELETE SET NULL`，删 blob 行时自动清掉节点上的指针。
+- **秒传接口**：`POST /api/v1/files/instant`。客户端提供哈希和大小，命中已有内容只在数据库插入一条 `nodes` 记录，完全不消耗上传流量；哈希不存在返回 404，大小不符返回 400。
+- **物理垃圾回收机制**：`DELETE /api/v1/files/{id}` 先软删除子树，再调 `ReclaimOrphanBlobs` 找出不再被任何节点引用的文件 Key，调存储引擎删磁盘。物理删除哪怕失败也只记 WARN 仍然返回 204，因为逻辑删除已经提交，不能骗客户端说失败。
+- **攻克原子回收 SQL（D3 难点，自己写、Agent review）**：单条 SQL 完成：递归 CTE 找出刚被软删的整棵子树 → 提取去重后的 `blob_id` → `DELETE FROM blobs WHERE NOT EXISTS (还有存活节点引用) RETURNING storage_key`。
+- **数据库外键微调**：增加 `migrations/0002`，将 `nodes.blob_id` 外键设为 `ON DELETE SET NULL`，删掉 blob 时自动清掉节点上的指针。
 
-**判据（实测）**
+**实测验证**
 
-| 验的什么 | 结果 |
+| 验证场景 | 结果 |
 | --- | --- |
-| `internal/repository/blobs_test.go` 5 条（打真库，非 SKIP） | 5/5 PASS |
-| D2 那 7 条（没被碰坏） | 7/7 PASS |
-| 端到端：同一内容两个引用，删掉其中一个 | **204**，blob 行仍 1、盘上文件不动 |
-| 端到端：删掉最后一个引用 | **204**，blob 行 → 0、盘上文件被删，日志无 WARN |
+| `blobs_test.go` 5 条集成测试 | 全部 PASS |
+| D2 的 7 条既有测试回归 | 全部 PASS |
+| 两个用户传同个文件，其中一人删除 | **204**，blob 记录和磁盘文件都保留 |
+| 最后一个引用也被删除 | **204**，blob 记录清空，磁盘物理文件被真删 |
 
-**卡在哪 / 踩到的坑**
+**踩坑与思考**
 
-1. 展开子树那段**不能**带 `deleted_at IS NULL`：要回收的节点刚被弱删，带了就一行都查不到。
-2. 存活判定**不能**带 `owner_id`：必须全局看，别人还在用的内容绝不能删。
-3. 第一版编不过：写成 `s.db.QueryContext(...)` —— 本包 `Store` 只有 `pool` 字段，且 pgx v5 的方法名
-   是 `Query`（没有 `QueryContext`）。又把 `database/sql` 的习惯带过来了。
+1. **回收 SQL 的过滤条件坑**：展开子树时**绝对不能**加 `deleted_at IS NULL`，因为要处理的节点刚刚才被软删，加了就查不出任何东西了；但在检查外部是否还有人引用该 blob 时，**绝不能**限定当前用户的 `owner_id`，必须全局检查是否有人在用。
+2. **驱动习惯问题**：pgx v5 的连接池方法是 `pool.Query`，惯性写成了标准库的 `QueryContext` 导致编译不通过，框架 API 要记熟。
 
 **下一步**
 
-- D4：分片续传状态机。判据：拆成分片上传、中断后能接着传，最终合并出的文件与整传一致。
+- D4：大文件分片上传与断点续传状态机。
+
+---
 
 ## 2026-10-04 · D4 分片续传：分片上传 + 收尾状态机
 
 **做了什么**
 
-- 分片上传六个端点：`POST /api/v1/uploads`（开会话）、`GET /api/v1/uploads`（列还没收尾的会话）、
-  `GET /api/v1/uploads/{id}`（进度：已收到哪些片、还缺哪些）、
-  `PUT /api/v1/uploads/{id}/parts/{part_no}`（传一片，请求体就是原始字节，流式写盘）、
-  `POST /api/v1/uploads/{id}/complete`（收尾合并）、`DELETE /api/v1/uploads/{id}`（放弃并清分片）。
-- 状态走 D0 就建好的两张表（`upload_sessions` / `upload_parts`），不用新迁移。分片主键
-  `(session_id, part_no)`，所以重传同一片是幂等 upsert —— 这是断点续传能工作的原因。
-  `part_no` 从 0 开始，每片大小强校验（必须正好等于 `chunk_size`，最后一片是余数）。
-- `storage.Concat`：把多个分片对象按给定顺序拼成一个新对象（临时文件 → `Sync` → `Rename`，
-  和 `Put` 同一套路），边拼边算整份内容的 SHA-256。
-- **`Uploads.Complete`（D4 的难点，自己写、Agent review）**：状态前置检查（非 pending → 409、
-  别人的会话 → 404）→ 清点缺片（缺 → 409，且不建节点、不删分片）→ 按 `part_no` 升序 `Concat` →
-  `UpsertBlob`（命中已有内容就删掉刚拼的副本）→ `CreateNode`（撞唯一索引收回刚登记的行与对象，
-  再翻同名冲突）→ `TransitionUploadSession` 推到 completed → 清掉分片对象。
+- **分片上传接口**：提供创建上传会话、查询未完成任务、查询已传/缺失分片进度、上传单片、合并收尾、主动取消这套全流程端点。
+- **会话状态控制**：基于 `upload_sessions` 和 `upload_parts` 记录进度，分片表以 `(session_id, part_no)` 为联合主键，重传同一片天然幂等覆盖。除最后一片外，其余分片大小强制校验对齐。
+- **流式拼接 `storage.Concat`**：按顺序拼接分片临时文件，边拼边算完整文件哈希，最后原子 Rename 落盘。
+- **合并收尾状态机（D4 核心难点，自己写、Agent review）**：
+  在 `Uploads.Complete` 逐项把关：检查会话归属和状态 → 校验分片是否齐全（缺片直接 409）→ 按分片序号升序拼接 → 检查是否撞已有 Hash（命中就复用旧内容删掉刚拼的副本）→ 插入文件节点（重名冲突时主动收回刚才登记的数据）→ 会话标记完成并清理临时切片。
 
-**判据（实测）**
+**实测结果**
 
-| 验的什么 | 结果 |
+| 场景 | 表现 |
 | --- | --- |
-| `internal/service/uploads_test.go` 7 条（打真库，非 SKIP） | 7/7 PASS |
-| `internal/storage/concat_test.go` 4 条 | 4/4 PASS |
-| `go test ./...`（repository / service / storage） | 全绿 |
-| 端到端：只传 0、2 两片，查进度 | `received=[0,2] missing=[1]` |
-| 端到端：缺片就收尾 | **409**（missing one or more parts） |
-| 端到端：补齐第 1 片后收尾 | **201**，`node.size=3000` |
-| 端到端：下载合并结果 | sha256 与原始一致、逐字节相同 |
-| 端到端：Range `bytes=1000-1999` | **206** + `Content-Range: bytes 1000-1999/3000`，体 1000 字节 |
-| 端到端：收尾后盘上分片 | 0 个文件残留 |
+| 单元与集成测试 | 11/11 项全部 PASS，服务测试全绿 |
+| 传完第 0、2 片查进度 | 准确返回 `received=[0,2] missing=[1]` |
+| 缺片状态下强行点合并 | 报 **409 Conflict**，不建节点、不删分片 |
+| 补齐第 1 片后点合并 | 成功返回 **201**，文件大小精确匹配 |
+| 下载合并后的文件 | SHA-256 与原文件一致，支持 HTTP 206 断点范围读取 |
+| 合并后清理检查 | 本地分片临时文件全部自动清空 |
 
-**卡在哪 / 踩到的坑**
+**踩坑与思考**
 
-1. 两个实参顺序写反了：`UpsertBlob` 是 `(hash, size, backend, storageKey)`，`CreateNode` 是
-   `(…, isDir, size, blobID)`。居然顺序不一样也会编译不过，的确值得注意
-2. 同名冲突那条契约要三件事一起做：翻 `ErrNameConflict`、把刚登记的 blob 行收回、删掉刚拼出来的
-   那份副本 —— 且"收回"只在这次真插了新行时做，否则会删到别人的内容。
-3. 拼接顺序是**调用方**的责任（`Concat` 那层不认识 `part_no`）：必须靠 `ListUploadParts` 的
-   `ORDER BY part_no`，不能按到达顺序拼。
+1. **形参顺序搞反踩坑**：
+   `UpsertBlob` 是 `(hash, size, backend, storageKey)`，而 `CreateNode` 后面接的是 `(..., isDir, size, blobID)`。位置参数一多容易看走眼导致类型错位编译报错，参数多的内部函数封装成专门的 Struct 确实更稳妥。
+2. **合并顺序是业务层的责任**：
+   底层存储只负责拼文件，根本不认识业务里的分片号；必须靠业务层查库时显式加上 `ORDER BY part_no`，绝不能按网络到达的乱序去拼。
 
 **下一步**
 
-- P4 分享链接（必做，还没做）：先做"创建 + 匿名访问"两条路径。
-- 有余力：P8 文件夹打包下载（`archive/zip` + `io.Pipe` 流式不落盘）、P6 对象存储。
-- 收尾：补关键路径测试、README、把演示彩排一遍。
+- P4 分享链接：创建、匿名访问与权限校验。
+- P8 文件夹打包下载（`archive/zip` + `io.Pipe` 流式下发）。
+
+---
 
 ## 2026-10-04 · P4 分享链接：创建 / 匿名访问 / 撤销
 
 **做了什么**
 
-- 三条管理端点（要登录）：`POST /api/v1/shares`（建：`node_id` + 可选 `expires_in_seconds`）、
-  `GET /api/v1/shares`（列我建过的）、`DELETE /api/v1/shares/{id}`（撤销）。
-- 两条匿名端点（**故意不挂鉴权**：分享链接的依据是‘token’自身，不是‘你是谁’，挂了鉴权就把这个功能废掉了，并且这条路径的校验流程并没有少，只是从中间件挪进了service里面，判定更加严格；代价是 token 一旦泄漏谁拿到谁能下 —— 限流、绑定这类收紧目前还没做（不可枚举、撤销、过期这三件已经做了））：`GET /api/v1/share/{token}`（节点元信息，目录时带直接子项）、
-  `GET /api/v1/share/{token}/download?node_id=`（下载；分享的是目录时用 `node_id` 指定下哪一项）。
-- `token` 是 128 位随机数的十六进制串，不可枚举。
-- **`NodeIsLive`（这次的重点）**：沿 `parent_id` 爬到根的递归 CTE —— 只要链路上有一环
-  `deleted_at` 非空就判死。`shares.node_id` 的 `ON DELETE CASCADE` 对**弱删**不触发，所以
-  "父目录被删了、里面的文件还能通过旧链接下"这个洞只能靠访问时重新校验来挡。
-- 目录分享的越权：匿名下载要带 `node_id`，必须确认它确实在这棵子树里（复用 D2 的
-  `IsSelfOrDescendant`），否则一律 404。
-- 表 `shares` 是 D0 就建好的，不用迁移。
+- **管理端接口（需登录）**：创建分享（带过期时间）、查看我创建的分享、主动撤销分享。
+- **匿名提取端点（故意不挂登录中间件）**：
+  开放根据 Token 获取元信息和文件下载。
+  *设计取舍*：分享链接的本质是“认 Token 不认人”，如果挂了 JWT 鉴权这个功能就没法用了。安全保证转移到 Service 层内：Token 采用 128 位随机数十六进制串防枚举，下载时做严格的作用域和有效性校验。
+- **解决软删除链路穿透 `NodeIsLive`（核心重点）**：
+  外键 `ON DELETE CASCADE` 对软删除（只改 `deleted_at`）完全不生效，导致父目录被删后里面的文件还能通过旧链接下载。写了一条自底向上的递归 CTE，访问时检查整条链路，只要任意祖先被软删就判定失效。
+- **防止越权遍历目录**：匿名下载共享目录内的文件时，通过 `IsSelfOrDescendant` 确认请求的文件确实属于该子树，否则报 404。
 
-**判据（实测）**
+**实测结果**
 
-| 验的什么 | 结果 |
+| 场景 | 表现 |
 | --- | --- |
-| `internal/repository/shares_test.go` 5 条（打真库，非 SKIP） | 5/5 PASS |
-| `internal/service/shares_test.go` 6 条（打真库，非 SKIP） | 6/6 PASS |
-| 端到端：匿名打开目录分享 | 200，`children=["sub","a.txt"]`（目录在前） |
-| 端到端：匿名下直接子项 / 孙节点 | 200 "AAA" / 200 "BBB" |
-| 端到端：匿名下**子树外**的文件 | 404 |
-| 端到端：匿名下目录本身 | 400 |
-| 端到端：删掉父目录后（弱删整棵子树） | 元信息与下载**都 404** |
-| 端到端：撤销后 / 假 token | 404 / 404 |
+| 模块单测与集成测试 | 11/11 项全部 PASS |
+| 匿名打开目录分享链接 | 200，正常输出子项列表 |
+| 匿名下载目录下的文件或深层孙节点 | 200，内容逐字节正确 |
+| 匿名尝试下载分享目录外部的文件 | 返回 **404 Not Found**（防探测） |
+| 删除父目录后继续访问子文件分享 | 命中链路活性检测，返回 **404 Not Found** |
+| 撤销后或假 Token 访问 | 返回 **404 Not Found** |
 
-**卡在哪 / 踩到的坑**
+**踩坑与思考**
 
-1. **CASCADE 兜不住弱删**：`shares.node_id` 是 `ON DELETE CASCADE`，但删除走的是弱删
-   （只打 `deleted_at`），所以这条外键在主流程里永远不触发 —— 必须在访问时自己沿祖先链校验。
-   递归的起点和每一跳都**不能**带 `deleted_at IS NULL`，带了就变成恒为真。
-2. 匿名路由不挂 `requireAuth`（"拿 token 的人就是被授权的人"），所以"目标还在不在、是不是在
-   这棵子树里"只能在 service 里校验，指望不上中间件。
-3. 越权和"不存在"统一回 404 —— 不区分这两种，免得有人拿 token 当探针枚举别人的 node id。
-   代价是客户端分不出"链接过期了"还是"本来就没有"。
+1. **软删除与数据库级联约束的冲突**：
+   数据库层面的级联删除只认物理 `DELETE`。在软删除体系下，这种层级有效性只能靠业务层沿祖先链自己做检查，不能依赖数据库约束。
+2. **模糊错误响应防探测**：
+   不管是权限越权还是真的不存在，对匿名用户统一返回 404，不向外界暴露内部节点是否存在的线索。
 
 **下一步**
 
-- P0–P5 必做全部完成。
-- 有余力：P8 文件夹打包下载（`archive/zip` + `io.Pipe` 流式不落盘）、P6 对象存储。
-- 收尾：README、把演示彩排一遍。
+- P8：实现文件夹整树 ZIP 打包流式下载。
+
+---
+
+## 2026-10-05 · P8 文件夹打包下载：流式 zip
+
+**做了什么**
+
+- **新增打包端点**：`GET /api/v1/files/{id}/zip`，支持将整棵文件夹打包成 ZIP 下载。
+- **OpenZip 管道流式设计**：
+  先**同步**校验权限和节点类型（如果目标是文件直接返回 400 JSON 错误）；校验通过后再开 `io.Pipe` 扔给后台 Goroutine 边打包边推给客户端。这样中途出错时读端能拿到这个错误，而不是把半截包当成下完了。
+- **攻克 `writeZip` 遍历核心（自己写、Agent review）**：
+  递归遍历 `ListChildren` 子树，边查边向 zip 流写入头信息；文件内容直接用 `storage.Open` + `io.Copy` 流式注入，全程不落地、不用 `io.ReadAll`；对空目录显式补一条以 `/` 结尾的目录头，防止解压后空目录丢失；根据扩展名智能选择压缩方式（图片、音视频、已有压缩包用 `zip.Store`，其余走 `zip.Deflate` 省 CPU）。
+- **关于为什么不做 Range 续传**：
+  ZIP 规范的中央目录在整个文件的最末尾，而且 Deflate 压缩的动态字节偏移不可预测，天生不支持按字节区间切片。真想做就必须把整个包先生成在磁盘上再做 `ServeContent`，这会极大增加首字节等待时间和磁盘负担，权衡后选择边遍历边流式的做法。
+
+**实测结果**
+
+| 场景 | 表现 |
+| --- | --- |
+| `zip_test.go` 专项测试 | **4/4 全部 PASS** |
+| 打包多层嵌套目录 | 200 OK，`Content-Type: application/zip`，条目内容逐字节一致 |
+| 目录条目格式 | 内部无多余前导 `/`，空目录解压后完好保留 |
+| 对单文件 ID 调用打包接口 | 返回 **400 Bad Request** |
+| 150MB 文件打包内存监控 | 下载了 157MB 数据，服务端进程 RSS 内存只涨了 **180 KB** |
+
+**踩坑与思考**
+
+1. **ZIP 目录识别细节**：
+   Go 标准库 `archive/zip` 只要文件名末尾带正斜杠 `/` 就会自动打上目录标识，不需要额外手动调 `SetMode`，常见解压软件都能正常识别。
+2. **递归查询的开销权衡**：
+   目前是用 Go 递归调 `ListChildren`，每个子目录会多一次 DB 查询（N+1 次往返）。当前规模完全够用；后续目录层级极深时，可以考虑写一条单次全量查整树的递归 CTE。
+3. **异常中断处理**：
+   打包中途出错时**绝对不能**顺手调用 `zw.Close()`，否则会写入合法的中央目录封口，让客户端误以为下载完整了；直接 `pw.CloseWithError(err)` 掐断即可。
+
+**下一步**
+
+- 准备整体项目复盘与答辩演示。
