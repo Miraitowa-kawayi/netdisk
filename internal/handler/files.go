@@ -223,6 +223,41 @@ func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, dl.Name, dl.ModTime, dl.Content)
 }
 
+// downloadZip 把文件夹整棵子树打包成 zip 流式下发（P8）。
+//
+// 和 downloadFile 的关键区别：这里**没有** Content-Length、也**不给** Range ——
+// zip 的中央目录在末尾、条目偏移随压缩变，天然不适合按字节区间切。所以刻意走一条
+// "边遍历边吐字节"的路，而不是先落一个临时文件（那能拿回 Range，代价是磁盘 + 首字节延迟）。
+func (s *Server) downloadZip(w http.ResponseWriter, r *http.Request) {
+	uid, ok := userID(r)
+	if !ok {
+		httpx.Fail(w, r, s.deps.Logger, httpx.Unauthorized("authentication required"))
+		return
+	}
+
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		httpx.Fail(w, r, s.deps.Logger, httpx.NotFound("no such folder"))
+		return
+	}
+
+	z, err := s.deps.Files.OpenZip(r.Context(), uid, id)
+	if err != nil {
+		s.failService(w, r, err)
+		return
+	}
+	// 读端提前退出（客户端断开 / 中途出错）时要 Close，让写端的 pw.Write 立刻失败，
+	// 否则遍历 goroutine 会一直阻塞在管道上。
+	defer z.Content.Close()
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", contentDisposition(z.Name))
+	if _, err := io.Copy(w, z.Content); err != nil {
+		// 响应头已经发出去了，状态码改不了。只能记一笔，连接到此为止。
+		s.deps.Logger.Warn("stream folder zip", "node_id", id, "error", err)
+	}
+}
+
 // createDirRequest 是 POST /files/dirs 的请求体。
 // parent_id 缺省、空串、null 都表示根目录（JSON 的 null 解到 string 会保持零值）。
 type createDirRequest struct {

@@ -17,6 +17,8 @@ var (
 	ErrNameConflict = errors.New("another entry with the same name already exists here")
 	// ErrNotAFile 下载目标是个文件夹。
 	ErrNotAFile = errors.New("target is a folder, not a file")
+	// ErrNotADirectory 打包下载的目标是个文件 —— zip 只能打包文件夹。
+	ErrNotADirectory = errors.New("target is a file, not a folder")
 	// ErrCycle 移动会让文件树成环：把文件夹移进它自己或它自己的子孙里。
 	ErrCycle = errors.New("cannot move a folder into itself or its own subdirectory")
 	// ErrContentNotStored 秒传时服务端没有这个 hash 的内容 —— 客户端得老实传一遍。

@@ -50,7 +50,8 @@ func (s *Server) failService(w http.ResponseWriter, r *http.Request, err error) 
 	case errors.Is(err, service.ErrContentNotStored):
 		// 秒传命中失败：服务端没有这份内容 —— 不是"参数格式错"，是"你要的东西这里没有"。
 		httpx.Fail(w, r, s.deps.Logger, httpx.NotFound(err.Error()))
-	case errors.Is(err, service.ErrNotAFile):
+	case errors.Is(err, service.ErrNotAFile), errors.Is(err, service.ErrNotADirectory):
+		// "拿文件夹当文件下"和"拿文件当文件夹打包"都是客户端用错了目标，400。
 		httpx.Fail(w, r, s.deps.Logger, httpx.Invalid(err.Error()))
 	default:
 		// 未识别的错误：httpx.Fail 会按 500 处理并把细节写进日志，不泄露给客户端

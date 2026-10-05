@@ -1,6 +1,7 @@
 package service
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -299,6 +300,161 @@ func (f *Files) OpenDownload(ctx context.Context, ownerID, id uuid.UUID) (Downlo
 		return Download{}, err
 	}
 	return Download{Name: node.Name, Size: blob.Size, ModTime: node.UpdatedAt, Content: rc}, nil
+}
+
+// ZipDownload 是一次"文件夹打包下载"。
+type ZipDownload struct {
+	Name    string        // 建议的文件名（含 .zip）
+	Content io.ReadCloser // 边遍历边产生的 zip 字节流
+}
+
+// OpenZip 打开一个文件夹的打包下载（P8）。
+//
+// 分两段，顺序是刻意的：
+//  1. **同步**做能翻成 404/400 的校验 —— 节点存在、属于调用者、且是目录。这一段失败时
+//     一个字节都还没写，所以能给客户端一个干净的 JSON 错误。
+//  2. 遍历与打包丢进 goroutine，经 io.Pipe 流给 handler。一旦开始吐字节就改不了状态码，
+//     中途出错只能 CloseWithError 让读端拿到错误（handler 记日志、断连）。
+//
+// 遍历那一段（writeZip）留给你实现 —— 契约见它的注释。
+func (f *Files) OpenZip(ctx context.Context, ownerID, id uuid.UUID) (ZipDownload, error) {
+	root, err := f.store.GetNode(ctx, ownerID, id)
+	if errors.Is(err, repository.ErrNotFound) {
+		return ZipDownload{}, ErrNotFound
+	}
+	if err != nil {
+		return ZipDownload{}, err
+	}
+	if !root.IsDir {
+		return ZipDownload{}, ErrNotADirectory
+	}
+
+	pr, pw := io.Pipe()
+	go func() {
+		zw := zip.NewWriter(pw)
+		// 出错时**不要**再 zw.Close()：那会吐出一个"空但合法"的 zip，
+		// 让读端以为成功。直接把错误交给读端。
+		if err := f.writeZip(ctx, zw, root); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		if err := zw.Close(); err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		_ = pw.Close()
+	}()
+
+	return ZipDownload{Name: root.Name + ".zip", Content: pr}, nil
+}
+
+// writeZip 把 root 的整棵子树写进 zw。这是 P8 的核心，留给你实现。
+//
+// 契约（internal/service/zip_test.go 逐条验）：
+//  1. 顶层前缀是 root.Name + "/"：root=docs、里面 a.txt → 条目名 "docs/a.txt"。
+//  2. 条目名一律正斜杠、**不带前导 '/'**，目录项以 '/' 结尾。
+//     （带前导 '/' 的条目 Windows 资源管理器会当成绝对路径，直接打不开压缩包。）
+//  3. 空目录要显式写一条（名字以 '/' 结尾），否则解压后消失。
+//  4. 文件内容用 f.storage.Open 流式拷进条目，**别整个读进内存**（判据同 D1：看进程 RSS）。
+//  5. 遍历里 ctx 一取消就尽快返回（客户端断开时别接着读盘）。
+//  6. 只走自己的树：向下扩展时每一步都带 owner_id 与 deleted_at IS NULL。
+//     工具：f.store.ListChildren(ctx, ownerID, parentID)。
+//  7. 已压缩的扩展名（.jpg .png .gif .zip .mp4 .mp3 …）用 zip.Store，其余 zip.Deflate，省 CPU。
+//
+// 出错就 return err；OpenZip 会把它带给读端。
+func (f *Files) writeZip(ctx context.Context, zw *zip.Writer, root model.Node) error {
+	rootPrefix := strings.Trim(root.Name, "/") + "/"
+	rootHeader := &zip.FileHeader{
+		Name:     rootPrefix,
+		Method:   zip.Store,
+		Modified: root.UpdatedAt,
+	}
+	if _, err := zw.CreateHeader(rootHeader); err != nil {
+		return fmt.Errorf("create root dir entry: %w", err)
+	}
+
+	var walk func(parentID *uuid.UUID, currentPrefix string) error
+	walk = func(parentID *uuid.UUID, currentPrefix string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		children, err := f.store.ListChildren(ctx, root.OwnerID, parentID)
+		if err != nil {
+			return err
+		}
+
+		for _, child := range children {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+
+			childPrefix := currentPrefix + child.Name
+
+			if child.IsDir {
+				dirHeader := &zip.FileHeader{
+					Name:     childPrefix + "/",
+					Method:   zip.Store,
+					Modified: child.UpdatedAt,
+				}
+				if _, err := zw.CreateHeader(dirHeader); err != nil {
+					return fmt.Errorf("create dir entry: %w", err)
+				}
+				childID := child.ID
+				if err := walk(&childID, childPrefix+"/"); err != nil {
+					return err
+				}
+			} else {
+				fileHeader := &zip.FileHeader{
+					Name:     childPrefix,
+					Method:   getCompressionMethod(child.Name), // 契约 7
+					Modified: child.UpdatedAt,
+				}
+
+				writer, err := zw.CreateHeader(fileHeader)
+				if err != nil {
+					return fmt.Errorf("create file entry: %w", err)
+				}
+
+				if child.BlobID == nil {
+					continue
+				}
+
+				blob, err := f.store.GetBlobByID(ctx, *child.BlobID)
+				if err != nil {
+					return fmt.Errorf("get blob: %w", err)
+				}
+
+				if err := func() error {
+					reader, _, err := f.storage.Open(ctx, blob.StorageKey)
+					if err != nil {
+						return fmt.Errorf("open file content: %w", err)
+					}
+					defer reader.Close()
+
+					_, err = io.Copy(writer, reader)
+					return err
+				}(); err != nil {
+					return fmt.Errorf("write file content: %w", err)
+				}
+			}
+		}
+		return nil
+	}
+
+	rootID := root.ID
+	return walk(&rootID, rootPrefix)
+}
+
+// getCompressionMethod 按扩展名挑压缩方式：已压缩的格式直接 Store，其余 Deflate。
+func getCompressionMethod(name string) uint16 {
+	ext := strings.ToLower(path.Ext(name))
+	switch ext {
+	case ".jpg", ".png", ".gif", ".zip", ".mp4", ".mp3":
+		return zip.Store
+	default:
+		return zip.Deflate
+	}
 }
 
 // checkParent 确认父目录存在、属于自己、且真的是个目录。
